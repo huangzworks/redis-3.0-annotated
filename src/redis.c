@@ -69,51 +69,112 @@ struct redisCommand *commandTable;
 
 /* Our command table.
  *
+ * 命令表
+ *
  * Every entry is composed of the following fields:
  *
+ * 表中的每个项都由以下域组成：
+ *
  * name: a string representing the command name.
+ *       命令的名字
+ *
  * function: pointer to the C function implementing the command.
+ *           一个指向命令的实现函数的指针
+ *
  * arity: number of arguments, it is possible to use -N to say >= N
+ *        参数的数量。可以用 -N 表示 >= N 
+ *
  * sflags: command flags as string. See below for a table of flags.
+ *         字符串形式的 FLAG ，用来计算以下的真实 FLAG 
+ *
  * flags: flags as bitmask. Computed by Redis using the 'sflags' field.
+ *        位掩码形式的 FLAG ，根据 sflags 的字符串计算得出
+ *
  * get_keys_proc: an optional function to get key arguments from a command.
  *                This is only used when the following three fields are not
  *                enough to specify what arguments are keys.
+ *                一个可选的函数，用于从命令中取出 key 参数，仅在以下三个参数都不足以表示 key 参数时使用
+ *
  * first_key_index: first argument that is a key
+ *                  第一个 key 参数的位置
+ *
  * last_key_index: last argument that is a key
+ *                 最后一个 key 参数的位置
+ *
  * key_step: step to get all the keys from first to last argument. For instance
  *           in MSET the step is two since arguments are key,val,key,val,...
+ *           从 first 参数和 last 参数之间，所有 key 的步数（step）
+ *           比如说， MSET 命令的格式为 MSET key value [key value ...]
+ *           它的 step 就为 2
+ *
  * microseconds: microseconds of total execution time for this command.
+ *               执行这个命令耗费的总微秒数
+ *
  * calls: total number of calls of this command.
+ *        命令被执行的总次数
  *
  * The flags, microseconds and calls fields are computed by Redis and should
  * always be set to zero.
+ *
+ * microseconds 和 call 由 Redis 计算，总是初始化为 0 。
  *
  * Command flags are expressed using strings where every character represents
  * a flag. Later the populateCommandTable() function will take care of
  * populating the real 'flags' field using this characters.
  *
+ * 命令的 FLAG 首先由 SFLAG 域设置，之后 populateCommandTable() 函数从 sflags 属性中计算出真正的 FLAG 到 flags 属性中。
+ *
  * This is the meaning of the flags:
  *
+ * 以下是各个 FLAG 的意义：
+ *
  * w: write command (may modify the key space).
+ *    写入命令，可能会修改 key space
+ *
  * r: read command  (will never modify the key space).
+ *    读命令，不修改 key space
  * m: may increase memory usage once called. Don't allow if out of memory.
+ *    可能会占用大量内存的命令，调用时对内存占用进行检查
+ *
  * a: admin command, like SAVE or SHUTDOWN.
+ *    管理用途的命令，比如 SAVE 和 SHUTDOWN
+ *
  * p: Pub/Sub related command.
+ *    发布/订阅相关的命令
+ *
  * f: force replication of this command, regardless of server.dirty.
+ *    无视 server.dirty ，强制复制这个命令。
+ *
  * s: command not allowed in scripts.
+ *    不允许在脚本中使用的命令
+ *
  * R: random command. Command is not deterministic, that is, the same command
  *    with the same arguments, with the same key space, may have different
  *    results. For instance SPOP and RANDOMKEY are two random commands.
+ *    随机命令。
+ *    命令是非确定性的：对于同样的命令，同样的参数，同样的键，结果可能不同。
+ *    比如 SPOP 和 RANDOMKEY 就是这样的例子。
+ *
  * S: Sort command output array if called from script, so that the output
  *    is deterministic.
+ *    如果命令在 Lua 脚本中执行，那么对输出进行排序，从而得出确定性的输出。
+ *
  * l: Allow command while loading the database.
+ *    允许在载入数据库时使用的命令。
+ *
  * t: Allow command while a slave has stale data but is not allowed to
  *    server this data. Normally no command is accepted in this condition
  *    but just a few.
+ *    允许在附属节点带有过期数据时执行的命令。
+ *    这类命令很少有，只有几个。
+ *
  * M: Do not automatically propagate the command on MONITOR.
+ *    不要在 MONITOR 模式下自动广播的命令。
+ *
  * k: Perform an implicit ASKING for this command, so the command will be
  *    accepted in cluster mode if the slot is marked as 'importing'.
+ *    为这个命令执行一个显式的 ASKING ，
+ *    使得在集群模式下，一个被标示为 importing 的槽可以接收这命令。
  */
 struct redisCommand redisCommandTable[] = {
     {"get",getCommand,2,"r",0,NULL,1,1,1,0,0},
@@ -1565,16 +1626,27 @@ void initServer() {
 }
 
 /* Populates the Redis Command Table starting from the hard coded list
- * we have on top of redis.c file. */
+ * we have on top of redis.c file. 
+ *
+ * 根据 redis.c 文件顶部的命令列表，创建命令表
+ */
 void populateCommandTable(void) {
     int j;
+
+    // 命令的数量
     int numcommands = sizeof(redisCommandTable)/sizeof(struct redisCommand);
 
     for (j = 0; j < numcommands; j++) {
+        
+        // 指定命令
         struct redisCommand *c = redisCommandTable+j;
+
+        // 取出字符串 FLAG
         char *f = c->sflags;
+
         int retval1, retval2;
 
+        // 根据字符串 FLAG 生成实际 FLAG
         while(*f != '\0') {
             switch(*f) {
             case 'w': c->flags |= REDIS_CMD_WRITE; break;
@@ -1594,14 +1666,25 @@ void populateCommandTable(void) {
             f++;
         }
 
+        // 将命令关联到命令表
         retval1 = dictAdd(server.commands, sdsnew(c->name), c);
+
         /* Populate an additional dictionary that will be unaffected
-         * by rename-command statements in redis.conf. */
+         * by rename-command statements in redis.conf. 
+         *
+         * 将命令也关联到原始命令表
+         *
+         * 原始命令表不会受 redis.conf 中命令改名的影响
+         */
         retval2 = dictAdd(server.orig_commands, sdsnew(c->name), c);
+
         redisAssert(retval1 == DICT_OK && retval2 == DICT_OK);
     }
 }
 
+/*
+ * 重置命令表中的统计信息
+ */
 void resetCommandTableStats(void) {
     int numcommands = sizeof(redisCommandTable)/sizeof(struct redisCommand);
     int j;
@@ -1609,7 +1692,10 @@ void resetCommandTableStats(void) {
     for (j = 0; j < numcommands; j++) {
         struct redisCommand *c = redisCommandTable+j;
 
+        // 清零时间
         c->microseconds = 0;
+
+        // 清零调用次数
         c->calls = 0;
     }
 }
@@ -1653,10 +1739,16 @@ void redisOpArrayFree(redisOpArray *oa) {
 
 /* ====================== Commands lookup and execution ===================== */
 
+/*
+ * 根据给定命令名字（SDS），查找命令
+ */
 struct redisCommand *lookupCommand(sds name) {
     return dictFetchValue(server.commands, name);
 }
 
+/*
+ * 根据给定命令名字（C 字符串），查找命令
+ */
 struct redisCommand *lookupCommandByCString(char *s) {
     struct redisCommand *cmd;
     sds name = sdsnew(s);
@@ -1670,29 +1762,52 @@ struct redisCommand *lookupCommandByCString(char *s) {
  * the original table containing the original command names unaffected by
  * redis.conf rename-command statement.
  *
+ * 从当前命令表 server.commands 中查找给定名字，
+ * 如果没找到的话，就尝试从 server.orig_commands 中查找未被改名的原始名字
+ * 原始表中的命令名不受 redis.conf 中命令改名的影响
+ *
  * This is used by functions rewriting the argument vector such as
  * rewriteClientCommandVector() in order to set client->cmd pointer
- * correctly even if the command was renamed. */
+ * correctly even if the command was renamed. 
+ *
+ * 这个函数可以在命令被更名之后，仍然在重写命令时得出正确的名字。
+ */
 struct redisCommand *lookupCommandOrOriginal(sds name) {
+
+    // 查找当前表
     struct redisCommand *cmd = dictFetchValue(server.commands, name);
 
+    // 如果有需要的话，查找原始表
     if (!cmd) cmd = dictFetchValue(server.orig_commands,name);
+
     return cmd;
 }
 
 /* Propagate the specified command (in the context of the specified database id)
  * to AOF and Slaves.
  *
+ * 将指定命令（以及执行该命令的上下文，比如数据库 id 等信息）传播到 AOF 和 slave 。
+ *
  * flags are an xor between:
+ * FLAG 可以是以下标识的 xor ：
+ *
  * + REDIS_PROPAGATE_NONE (no propagation of command at all)
+ *   不传播
+ *
  * + REDIS_PROPAGATE_AOF (propagate into the AOF file if is enabled)
+ *   传播到 AOF
+ *
  * + REDIS_PROPAGATE_REPL (propagate into the replication link)
+ *   传播到 slave
  */
 void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
                int flags)
 {
+    // 传播到 AOF
     if (server.aof_state != REDIS_AOF_OFF && flags & REDIS_PROPAGATE_AOF)
         feedAppendOnlyFile(cmd,dbid,argv,argc);
+
+    // 传播到 slave
     if (flags & REDIS_PROPAGATE_REPL)
         replicationFeedSlaves(server.slaves,dbid,argv,argc);
 }
@@ -1714,12 +1829,16 @@ void forceCommandPropagation(redisClient *c, int flags) {
 }
 
 /* Call() is the core of Redis execution of a command */
+// 调用命令的实现函数，执行命令
 void call(redisClient *c, int flags) {
+    // start 记录命令开始执行的时间
     long long dirty, start = ustime(), duration;
+    // 记录命令开始执行前的 FLAG
     int client_old_flags = c->flags;
 
     /* Sent the command to clients in MONITOR mode, only if the commands are
      * not generated from reading an AOF. */
+    // 如果可以的话，将命令发送到 MONITOR
     if (listLength(server.monitors) &&
         !server.loading &&
         !(c->cmd->flags & REDIS_CMD_SKIP_MONITOR))
@@ -1730,19 +1849,26 @@ void call(redisClient *c, int flags) {
     /* Call the command. */
     c->flags &= ~(REDIS_FORCE_AOF|REDIS_FORCE_REPL);
     redisOpArrayInit(&server.also_propagate);
+    // 保留旧 dirty 计数器值
     dirty = server.dirty;
+    // 执行实现函数
     c->cmd->proc(c);
+    // 计算命令执行之后的 dirty 值
     dirty = server.dirty-dirty;
+    // 计算命令执行耗费的时间
     duration = ustime()-start;
 
     /* When EVAL is called loading the AOF we don't want commands called
      * from Lua to go into the slowlog or to populate statistics. */
+    // 不将从 Lua 中发出的命令放入 SLOWLOG ，也不进行统计
     if (server.loading && c->flags & REDIS_LUA_CLIENT)
         flags &= ~(REDIS_CALL_SLOWLOG | REDIS_CALL_STATS);
 
     /* If the caller is Lua, we want to force the EVAL caller to propagate
      * the script if the command flag or client flag are forcing the
      * propagation. */
+    // 如果调用者是 Lua ，那么根据命令 FLAG 和客户端 FLAG
+    // 打开传播（propagate)标志
     if (c->flags & REDIS_LUA_CLIENT && server.lua_caller) {
         if (c->flags & REDIS_FORCE_REPL)
             server.lua_caller->flags |= REDIS_FORCE_REPL;
@@ -1752,32 +1878,44 @@ void call(redisClient *c, int flags) {
 
     /* Log the command into the Slow log if needed, and populate the
      * per-command statistics that we show in INFO commandstats. */
+    // 如果有需要，将命令放到 SLOWLOG 里面
     if (flags & REDIS_CALL_SLOWLOG && c->cmd->proc != execCommand)
         slowlogPushEntryIfNeeded(c->argv,c->argc,duration);
+    // 更新命令的统计信息
     if (flags & REDIS_CALL_STATS) {
         c->cmd->microseconds += duration;
         c->cmd->calls++;
     }
 
     /* Propagate the command into the AOF and replication link */
+    // 将命令复制到 AOF 和 slave 节点
     if (flags & REDIS_CALL_PROPAGATE) {
         int flags = REDIS_PROPAGATE_NONE;
 
+        // 强制 REPL 传播
         if (c->flags & REDIS_FORCE_REPL) flags |= REDIS_PROPAGATE_REPL;
+
+        // 强制 AOF 传播
         if (c->flags & REDIS_FORCE_AOF) flags |= REDIS_PROPAGATE_AOF;
+
+        // 如果数据库有被修改，那么启用 REPL 和 AOF 传播
         if (dirty)
             flags |= (REDIS_PROPAGATE_REPL | REDIS_PROPAGATE_AOF);
+
         if (flags != REDIS_PROPAGATE_NONE)
             propagate(c->cmd,c->db->id,c->argv,c->argc,flags);
     }
 
     /* Restore the old FORCE_AOF/REPL flags, since call can be executed
      * recursively. */
+    // 将客户端的 FLAG 恢复到命令执行之前
+    // 因为 call 可能会递归执行
     c->flags &= ~(REDIS_FORCE_AOF|REDIS_FORCE_REPL);
     c->flags |= client_old_flags & (REDIS_FORCE_AOF|REDIS_FORCE_REPL);
 
     /* Handle the alsoPropagate() API to handle commands that want to propagate
      * multiple separated commands. */
+    // 传播额外的命令
     if (server.also_propagate.numops) {
         int j;
         redisOp *rop;
@@ -1796,14 +1934,24 @@ void call(redisClient *c, int flags) {
  * processCommand() execute the command or prepare the
  * server for a bulk read from the client.
  *
+ * 这个函数执行时，我们已经读入了一个完整的命令到客户端，
+ * 这个函数负责执行这个命令，
+ * 或者服务器准备从客户端中进行一次读取。
+ *
  * If 1 is returned the client is still alive and valid and
  * other operations can be performed by the caller. Otherwise
- * if 0 is returned the client was destroyed (i.e. after QUIT). */
+ * if 0 is returned the client was destroyed (i.e. after QUIT). 
+ *
+ * 如果这个函数返回 1 ，那么表示客户端在执行命令之后仍然存在，
+ * 调用者可以继续执行其他操作。
+ * 否则，如果这个函数返回 0 ，那么表示客户端已经被销毁。
+ */
 int processCommand(redisClient *c) {
     /* The QUIT command is handled separately. Normal command procs will
      * go through checking for replication and QUIT will cause trouble
      * when FORCE_REPLICATION is enabled and would be implemented in
      * a regular command proc. */
+    // 特别处理 quit 命令
     if (!strcasecmp(c->argv[0]->ptr,"quit")) {
         addReply(c,shared.ok);
         c->flags |= REDIS_CLOSE_AFTER_REPLY;
@@ -1812,14 +1960,17 @@ int processCommand(redisClient *c) {
 
     /* Now lookup the command and check ASAP about trivial error conditions
      * such as wrong arity, bad command name and so forth. */
+    // 查找命令，并进行命令合法性检查，以及命令参数个数检查
     c->cmd = c->lastcmd = lookupCommand(c->argv[0]->ptr);
     if (!c->cmd) {
+        // 没找到指定的命令
         flagTransaction(c);
         addReplyErrorFormat(c,"unknown command '%s'",
             (char*)c->argv[0]->ptr);
         return REDIS_OK;
     } else if ((c->cmd->arity > 0 && c->cmd->arity != c->argc) ||
                (c->argc < -c->cmd->arity)) {
+        // 参数个数错误
         flagTransaction(c);
         addReplyErrorFormat(c,"wrong number of arguments for '%s' command",
             c->cmd->name);
@@ -1827,6 +1978,7 @@ int processCommand(redisClient *c) {
     }
 
     /* Check if the user is authenticated */
+    // 检查认证信息
     if (server.requirepass && !c->authenticated && c->cmd->proc != authCommand)
     {
         flagTransaction(c);
@@ -1867,8 +2019,13 @@ int processCommand(redisClient *c) {
      * First we try to free some memory if possible (if there are volatile
      * keys in the dataset). If there are not the only thing we can do
      * is returning an error. */
+    // 如果设置了最大内存，那么检查内存是否超过限制，并做相应的操作
     if (server.maxmemory) {
+        // 如果内存已超过限制，那么尝试通过删除过期键来释放内存
         int retval = freeMemoryIfNeeded();
+        // 如果即将要执行的命令可能占用大量内存（REDIS_CMD_DENYOOM）
+        // 并且前面的内存释放失败的话
+        // 那么向客户端返回内存错误
         if ((c->cmd->flags & REDIS_CMD_DENYOOM) && retval == REDIS_ERR) {
             flagTransaction(c);
             addReply(c, shared.oomerr);
@@ -1877,6 +2034,7 @@ int processCommand(redisClient *c) {
     }
 
     /* Don't accept write commands if there are problems persisting on disk. */
+    // 如果前面有 BGSAVE 发生了错误，那么拒绝执行写命令
     if (server.stop_writes_on_bgsave_err &&
         server.saveparamslen > 0
         && server.lastbgsave_status == REDIS_ERR &&
@@ -1901,6 +2059,7 @@ int processCommand(redisClient *c) {
 
     /* Don't accept write commands if this is a read only slave. But
      * accept write commands if this is our master. */
+    // 如果这个服务器是一个只读 slave 的话，那么拒绝执行写命令
     if (server.masterhost && server.repl_slave_ro &&
         !(c->flags & REDIS_MASTER) &&
         c->cmd->flags & REDIS_CMD_WRITE)
@@ -1910,6 +2069,7 @@ int processCommand(redisClient *c) {
     }
 
     /* Only allow SUBSCRIBE and UNSUBSCRIBE in the context of Pub/Sub */
+    // 在订阅于发布模式的上下文中，只能执行订阅和退订相关的命令
     if ((dictSize(c->pubsub_channels) > 0 || listLength(c->pubsub_patterns) > 0)
         &&
         c->cmd->proc != subscribeCommand &&
@@ -1933,12 +2093,15 @@ int processCommand(redisClient *c) {
 
     /* Loading DB? Return an error if the command has not the
      * REDIS_CMD_LOADING flag. */
+    // 如果服务器正在载入数据到数据库，那么只执行带有 REDIS_CMD_LOADING
+    // 标识的命令，否则将出错
     if (server.loading && !(c->cmd->flags & REDIS_CMD_LOADING)) {
         addReply(c, shared.loadingerr);
         return REDIS_OK;
     }
 
     /* Lua script too slow? Only allow a limited number of commands. */
+    // Lua 脚本超时，只允许执行限定的操作，比如 SHUTDOWN 和 SCRIPT KILL
     if (server.lua_timedout &&
           c->cmd->proc != authCommand &&
           c->cmd->proc != replconfCommand &&
@@ -1959,13 +2122,19 @@ int processCommand(redisClient *c) {
         c->cmd->proc != execCommand && c->cmd->proc != discardCommand &&
         c->cmd->proc != multiCommand && c->cmd->proc != watchCommand)
     {
+        // 在事务上下文中
+        // 除 EXEC 、 DISCARD 、 MULTI 和 WATCH 命令之外
+        // 其他所有命令都会被入队到事务队列中
         queueMultiCommand(c);
         addReply(c,shared.queued);
     } else {
+        // 执行命令
         call(c,REDIS_CALL_FULL);
+        // 处理那些解除了阻塞的键
         if (listLength(server.ready_keys))
             handleClientsBlockedOnLists();
     }
+
     return REDIS_OK;
 }
 
