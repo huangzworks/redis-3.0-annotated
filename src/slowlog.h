@@ -31,12 +31,26 @@
 #define SLOWLOG_ENTRY_MAX_STRING 128
 
 /* This structure defines an entry inside the slow log list */
+/*
+ * 慢查询日志
+ */
 typedef struct slowlogEntry {
+
+    // 命令，以及命令的参数
     robj **argv;
+
+    // 命令参数数量
     int argc;
+
+    // 唯一标识符
     long long id;       /* Unique entry identifier. */
+
+    // 执行命令消耗的时间，以纳秒（1 / 1,000,000,000 秒）为单位
     long long duration; /* Time spent by the query, in nanoseconds. */
+
+    // 命令执行时的时间
     time_t time;        /* Unix time at which the query was executed. */
+
 } slowlogEntry;
 
 /* Exported API */
