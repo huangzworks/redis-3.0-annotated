@@ -78,8 +78,8 @@ void createReplicationBacklog(void) {
  * the most recent bytes, or the same data and more free space in case the
  * buffer is enlarged). */
 // 动态调整 backlog 大小
-// 上面的注释说调整大小之后的 backlog 会保存调整前的数据，
-// 但代码中的实现是不保留的
+// 当 backlog 是被扩大时，原有的数据会被保留，
+// 因为分配空间使用的是 realloc
 void resizeReplicationBacklog(long long newsize) {
 
     // 不能小于最小大小
@@ -861,6 +861,7 @@ void sendBulkToSlave(aeEventLoop *el, int fd, void *privdata, int mask) {
         aeDeleteFileEvent(server.el,slave->fd,AE_WRITABLE);
         // 将状态更新为 REDIS_REPL_ONLINE
         slave->replstate = REDIS_REPL_ONLINE;
+        // 更新响应时间
         slave->repl_ack_time = server.unixtime;
         // 创建向从服务器发送命令的写事件处理器
         // 将保存并发送 RDB 期间的回复全部发送给从服务器
@@ -2086,7 +2087,7 @@ void replicationCron(void) {
     }
 
     /* Send ACK to master from time to time. */
-    // 定时向 master 发送 ACK
+    // slave 定时向 master 发送 ACK
     // 告知当前从服务器处理的偏移量
     if (server.masterhost && server.master)
         replicationSendAck();
@@ -2155,7 +2156,7 @@ void replicationCron(void) {
             // 略过正在发送 SYNC 的从服务器
             if (slave->flags & REDIS_PRE_PSYNC_SLAVE) continue;
 
-            // 处理超时从服务器
+            // 释放超时从服务器
             if ((server.unixtime - slave->repl_ack_time) > server.repl_timeout)
             {
                 char ip[REDIS_IP_STR_LEN];
