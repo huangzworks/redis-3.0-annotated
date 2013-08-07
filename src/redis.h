@@ -556,6 +556,7 @@ typedef struct redisClient {
     // 从服务器最后一次发送 REPLCONF ACK 的时间
     long long repl_ack_time;/* replication ack time, if this is a slave */
     // 主服务器的 master run ID
+    // 保存在客户端，用于执行部分重同步
     char replrunid[REDIS_RUN_ID_SIZE+1]; /* master run id if this is a master */
     // 从服务器的监听端口号
     int slave_listening_port; /* As configured with: SLAVECONF listening-port */
@@ -877,6 +878,7 @@ struct redisServer {
     char *pidfile;              /* PID file path */
     int arch_bits;              /* 32 or 64 depending on sizeof(long) */
     int cronloops;              /* Number of times the cron function run */
+    // 本服务器的 RUN ID
     char runid[REDIS_RUN_ID_SIZE+1];  /* ID always different at every exec. */
     int sentinel_mode;          /* True if this instance is a Sentinel. */
     /* Networking */
@@ -1113,7 +1115,7 @@ struct redisServer {
     int repl_disable_tcp_nodelay;   /* Disable TCP_NODELAY after SYNC? */
     // 从服务器优先级
     int slave_priority;             /* Reported in INFO and used by Sentinel. */
-    // 主服务器 RUN ID
+    // 本服务器（从服务器）当前主服务器的 RUN ID
     char repl_master_runid[REDIS_RUN_ID_SIZE+1];  /* Master run id for PSYNC. */
     // 初始化偏移量
     long long repl_master_initial_offset;         /* Master PSYNC offset. */

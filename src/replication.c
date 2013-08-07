@@ -2153,7 +2153,7 @@ void replicationCron(void) {
             // 略过未 ONLINE 的从服务器
             if (slave->replstate != REDIS_REPL_ONLINE) continue;
 
-            // 略过正在发送 SYNC 的从服务器
+            // 不检查旧版的从服务器
             if (slave->flags & REDIS_PRE_PSYNC_SLAVE) continue;
 
             // 释放超时从服务器
