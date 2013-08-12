@@ -640,7 +640,10 @@ void addReplyLongLong(redisClient *c, long long ll) {
 }
 
 void addReplyMultiBulkLen(redisClient *c, long length) {
-    addReplyLongLongWithPrefix(c,length,'*');
+    if (length < REDIS_SHARED_BULKHDR_LEN)
+        addReply(c,shared.mbulkhdr[length]);
+    else
+        addReplyLongLongWithPrefix(c,length,'*');
 }
 
 /* Create the length prefix of a bulk reply, example: $2234 */
@@ -662,7 +665,11 @@ void addReplyBulkLen(redisClient *c, robj *obj) {
             len++;
         }
     }
-    addReplyLongLongWithPrefix(c,len,'$');
+
+    if (len < REDIS_SHARED_BULKHDR_LEN)
+        addReply(c,shared.bulkhdr[len]);
+    else
+        addReplyLongLongWithPrefix(c,len,'$');
 }
 
 /* Add a Redis Object as a bulk reply 
@@ -941,8 +948,10 @@ void freeClient(redisClient *c) {
     /* Master/slave cleanup.
      * Case 1: we lost the connection with a slave. */
     if (c->flags & REDIS_SLAVE) {
-        if (c->replstate == REDIS_REPL_SEND_BULK && c->repldbfd != -1)
-            close(c->repldbfd);
+        if (c->replstate == REDIS_REPL_SEND_BULK) {
+            if (c->repldbfd != -1) close(c->repldbfd);
+            if (c->replpreamble) sdsfree(c->replpreamble);
+        }
         list *l = (c->flags & REDIS_MONITOR) ? server.monitors : server.slaves;
         ln = listSearchKey(l,c);
         redisAssert(ln != NULL);

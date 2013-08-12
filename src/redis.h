@@ -553,6 +553,8 @@ typedef struct redisClient {
     long repldboff;         /* replication DB file offset */
     // 主服务器传来的 RDB 文件的大小
     off_t repldbsize;       /* replication DB file size */
+    
+    sds replpreamble;       /* replication DB preamble. */
 
     // 主服务器的复制偏移量
     long long reploff;      /* replication offset if this is our master */
