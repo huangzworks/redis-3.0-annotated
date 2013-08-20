@@ -39,13 +39,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <assert.h>
 #include <limits.h>
 #include <sys/time.h>
 #include <ctype.h>
 
 #include "dict.h"
 #include "zmalloc.h"
+#include "redisassert.h"
 
 /* Using dictEnableResize() / dictDisableResize() we make possible to
  * enable/disable resizing of the hash table as needed. This is very important
@@ -872,6 +872,44 @@ void *dictFetchValue(dict *d, const void *key) {
     return he ? dictGetVal(he) : NULL;
 }
 
+/* A fingerprint is a 64 bit number that represents the state of the dictionary
+ * at a given time, it's just a few dict properties xored together.
+ * When an unsafe iterator is initialized, we get the dict fingerprint, and check
+ * the fingerprint again when the iterator is released.
+ * If the two fingerprints are different it means that the user of the iterator
+ * performed forbidden operations against the dictionary while iterating. */
+long long dictFingerprint(dict *d) {
+    long long integers[6], hash = 0;
+    int j;
+
+    integers[0] = (long long) d->ht[0].table;
+    integers[1] = d->ht[0].size;
+    integers[2] = d->ht[0].used;
+    integers[3] = (long long) d->ht[1].table;
+    integers[4] = d->ht[1].size;
+    integers[5] = d->ht[1].used;
+
+    /* We hash N integers by summing every successive integer with the integer
+     * hashing of the previous sum. Basically:
+     *
+     * Result = hash(hash(hash(int1)+int2)+int3) ...
+     *
+     * This way the same set of integers in a different order will (likely) hash
+     * to a different number. */
+    for (j = 0; j < 6; j++) {
+        hash += integers[j];
+        /* For the hashing step we use Tomas Wang's 64 bit integer hash. */
+        hash = (~hash) + (hash << 21); // hash = (hash << 21) - hash - 1;
+        hash = hash ^ (hash >> 24);
+        hash = (hash + (hash << 3)) + (hash << 8); // hash * 265
+        hash = hash ^ (hash >> 14);
+        hash = (hash + (hash << 2)) + (hash << 4); // hash * 21
+        hash = hash ^ (hash >> 28);
+        hash = hash + (hash << 31);
+    }
+    return hash;
+}
+
 /*
  * 创建并返回给定字典的不安全迭代器
  *
@@ -924,12 +962,16 @@ dictEntry *dictNext(dictIterator *iter)
             // 指向被迭代的哈希表
             dictht *ht = &iter->d->ht[iter->table];
 
-            // 在第一次迭代时，会判断这个语句
-            // 并决定是否对字典的安全迭代器计数加一
-            if (iter->safe && iter->index == -1 && iter->table == 0)
-                iter->d->iterators++;
-
-            // 索引
+            // 初次迭代时执行
+            if (iter->index == -1 && iter->table == 0) {
+                // 如果是安全迭代器，那么更新安全迭代器计数器
+                if (iter->safe)
+                    iter->d->iterators++;
+                // 如果是不安全迭代器，那么计算指纹
+                else
+                    iter->fingerprint = dictFingerprint(iter->d);
+            }
+            // 更新索引
             iter->index++;
 
             // 如果迭代器的当前索引大于当前被迭代的哈希表的大小
@@ -977,10 +1019,15 @@ dictEntry *dictNext(dictIterator *iter)
  */
 void dictReleaseIterator(dictIterator *iter)
 {
-    // 如果被释放的是安全迭代器，那么对字典的安全迭代器计数器减一
-    if (iter->safe && !(iter->index == -1 && iter->table == 0))
-        iter->d->iterators--;
 
+    if (!(iter->index == -1 && iter->table == 0)) {
+        // 释放安全迭代器时，安全迭代器计数器减一
+        if (iter->safe)
+            iter->d->iterators--;
+        // 释放不安全迭代器时，验证指纹是否有变化
+        else
+            assert(iter->fingerprint == dictFingerprint(iter->d));
+    }
     zfree(iter);
 }
 

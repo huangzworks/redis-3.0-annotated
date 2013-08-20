@@ -180,12 +180,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <assert.h>
 #include <limits.h>
 #include "zmalloc.h"
 #include "util.h"
 #include "ziplist.h"
 #include "endianconv.h"
+#include "redisassert.h"
 
 /*
  * ziplist 末端标识符，以及 5 字节长长度标识符

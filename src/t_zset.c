@@ -2030,29 +2030,22 @@ int zuiLength(zsetopsrc *op) {
         return 0;
 
     if (op->type == REDIS_SET) {
-
-        iterset *it = &op->iter.set;
-
         if (op->encoding == REDIS_ENCODING_INTSET) {
-            return intsetLen(it->is.is);
-
+            return intsetLen(op->subject->ptr);
         } else if (op->encoding == REDIS_ENCODING_HT) {
-            return dictSize(it->ht.dict);
-
+            dict *ht = op->subject->ptr;
+            return dictSize(ht);
         } else {
             redisPanic("Unknown set encoding");
         }
 
     } else if (op->type == REDIS_ZSET) {
 
-        iterzset *it = &op->iter.zset;
-
         if (op->encoding == REDIS_ENCODING_ZIPLIST) {
-            return zzlLength(it->zl.zl);
-
+            return zzlLength(op->subject->ptr);
         } else if (op->encoding == REDIS_ENCODING_SKIPLIST) {
-            return it->sl.zs->zsl->length;
-
+            zset *zs = op->subject->ptr;
+            return zs->zsl->length;
         } else {
             redisPanic("Unknown sorted set encoding");
         }
@@ -2267,11 +2260,11 @@ int zuiFind(zsetopsrc *op, zsetopval *val, double *score) {
 
     // 集合
     if (op->type == REDIS_SET) {
-        iterset *it = &op->iter.set;
-
         // 成员为整数，分值为 1.0
         if (op->encoding == REDIS_ENCODING_INTSET) {
-            if (zuiLongLongFromValue(val) && intsetFind(it->is.is,val->ell)) {
+            if (zuiLongLongFromValue(val) &&
+                intsetFind(op->subject->ptr,val->ell))
+            {
                 *score = 1.0;
                 return 1;
             } else {
@@ -2280,8 +2273,9 @@ int zuiFind(zsetopsrc *op, zsetopval *val, double *score) {
 
         // 成为为对象，分值为 1.0
         } else if (op->encoding == REDIS_ENCODING_HT) {
+            dict *ht = op->subject->ptr;
             zuiObjectFromValue(val);
-            if (dictFind(it->ht.dict,val->ele) != NULL) {
+            if (dictFind(ht,val->ele) != NULL) {
                 *score = 1.0;
                 return 1;
             } else {
@@ -2293,16 +2287,14 @@ int zuiFind(zsetopsrc *op, zsetopval *val, double *score) {
 
     // 有序集合
     } else if (op->type == REDIS_ZSET) {
-
-        iterzset *it = &op->iter.zset;
-
         // 取出对象
         zuiObjectFromValue(val);
 
         // ziplist
         if (op->encoding == REDIS_ENCODING_ZIPLIST) {
+
             // 取出成员和分值
-            if (zzlFind(it->zl.zl,val->ele,score) != NULL) {
+            if (zzlFind(op->subject->ptr,val->ele,score) != NULL) {
                 /* Score is already set by zzlFind. */
                 return 1;
             } else {
@@ -2311,9 +2303,11 @@ int zuiFind(zsetopsrc *op, zsetopval *val, double *score) {
 
         // SKIPLIST 编码
         } else if (op->encoding == REDIS_ENCODING_SKIPLIST) {
+            zset *zs = op->subject->ptr;
             dictEntry *de;
+
             // 从字典中查找成员对象
-            if ((de = dictFind(it->sl.zs->dict,val->ele)) != NULL) {
+            if ((de = dictFind(zs->dict,val->ele)) != NULL) {
                 // 取出分值
                 *score = *(double*)dictGetVal(de);
                 return 1;
@@ -2471,10 +2465,6 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
         }
     }
 
-    // 初始化迭代器
-    for (i = 0; i < setnum; i++)
-        zuiInitIterator(&src[i]);
-
     /* sort sets from the smallest to largest, this will improve our
      * algorithm's performance */
     // 对所有集合进行排序，以减少算法的常数项
@@ -2495,6 +2485,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
             /* Precondition: as src[0] is non-empty and the inputs are ordered
              * by size, all src[i > 0] are non-empty too. */
             // 遍历基数最小的 src[0] 集合
+            zuiInitIterator(&src[0]);
             while (zuiNext(&src[0],&zval)) {
                 double score, value;
 
@@ -2548,6 +2539,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
                     }
                 }
             }
+            zuiClearIterator(&src[0]);
         }
 
     // ZUNIONSTORE
@@ -2561,10 +2553,11 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
                 continue;
 
             // 遍历所有集合元素
+            zuiInitIterator(&src[i]);
             while (zuiNext(&src[i],&zval)) {
                 double score, value;
 
-                /* Skip key when already processed */
+                /* Skip an element that when already processed */
                 // 跳过已处理元素
                 if (dictFind(dstzset->dict,zuiObjectFromValue(&zval)) != NULL)
                     continue;
@@ -2575,11 +2568,10 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
                 // 溢出时设为 0
                 if (isnan(score)) score = 0;
 
-                /* Because the inputs are sorted by size, it's only possible
-                 * for sets at larger indices to hold this element. */
-                // 因为集合是按基数从小到大排序的
-                // 所以只需要向后检查更大的集合，就有可能会发现新元素
-                // 而之前的集合（基数小的），则不必再查找了
+                /* We need to check only next sets to see if this element
+                 * exists, since we process every element just one time so
+                 * it can't exist in a previous set (otherwise it would be
+                 * already processed). */
                 for (j = (i+1); j < setnum; j++) {
                     /* It is not safe to access the zset we are
                      * iterating, so explicitly check for equal object. */
@@ -2613,14 +2605,11 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
                         maxelelen = sdslen(tmp->ptr);
                 }
             }
+            zuiClearIterator(&src[i]);
         }
     } else {
         redisPanic("Unknown operator");
     }
-
-    // 释放迭代器
-    for (i = 0; i < setnum; i++)
-        zuiClearIterator(&src[i]);
 
     // 删除已存在的 dstkey ，等待后面用新对象代替它
     if (dbDelete(c->db,dstkey)) {
