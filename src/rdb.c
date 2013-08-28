@@ -1102,7 +1102,7 @@ int rdbSaveBackground(char *filename) {
 
             if (private_dirty) {
                 redisLog(REDIS_NOTICE,
-                    "RDB: %lu MB of memory used by copy-on-write",
+                    "RDB: %zu MB of memory used by copy-on-write",
                     private_dirty/(1024*1024));
             }
         }
@@ -1119,6 +1119,7 @@ int rdbSaveBackground(char *filename) {
 
         // 如果 fork() 出错，那么报告错误
         if (childpid == -1) {
+            server.lastbgsave_status = REDIS_ERR;
             redisLog(REDIS_WARNING,"Can't save in background: fork: %s",
                 strerror(errno));
             return REDIS_ERR;
