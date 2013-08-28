@@ -436,9 +436,10 @@ void flushallCommand(redisClient *c) {
 void delCommand(redisClient *c) {
     int deleted = 0, j;
 
-    // 删除所有输入键
+    // 遍历所有输入键
     for (j = 1; j < c->argc; j++) {
 
+        // 尝试删除键
         if (dbDelete(c->db,c->argv[j])) {
 
             // 删除键成功，发送通知
