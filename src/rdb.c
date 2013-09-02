@@ -1229,7 +1229,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
             }
         }
 
-    // 载入列表对戏哪个
+    // 载入集合对象
     } else if (rdbtype == REDIS_RDB_TYPE_SET) {
 
         /* Read list/set value 

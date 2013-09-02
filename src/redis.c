@@ -3239,12 +3239,20 @@ int checkForSentinelMode(int argc, char **argv) {
 
 /* Function called at startup to load RDB or AOF file in memory. */
 void loadDataFromDisk(void) {
+    // 记录开始时间
     long long start = ustime();
+
+    // AOF 持久化已打开？
     if (server.aof_state == REDIS_AOF_ON) {
+        // 尝试载入 AOF 文件
         if (loadAppendOnlyFile(server.aof_filename) == REDIS_OK)
+            // 打印载入信息，并计算载入耗时长度
             redisLog(REDIS_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
+    // AOF 持久化未打开
     } else {
+        // 尝试载入 RDB 文件
         if (rdbLoad(server.rdb_filename) == REDIS_OK) {
+            // 打印载入信息，并计算载入耗时长度
             redisLog(REDIS_NOTICE,"DB loaded from disk: %.3f seconds",
                 (float)(ustime()-start)/1000000);
         } else if (errno != ENOENT) {
