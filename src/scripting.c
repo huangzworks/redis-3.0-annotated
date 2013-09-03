@@ -1153,7 +1153,12 @@ void evalGenericCommand(redisClient *c, int evalsha) {
         }
 
         // 如果执行的是 EVAL ，那么创建新函数，然后将代码添加到脚本字典中
-        if (luaCreateFunction(c,lua,funcname,c->argv[1]) == REDIS_ERR) return;
+        if (luaCreateFunction(c,lua,funcname,c->argv[1]) == REDIS_ERR) {
+            lua_pop(lua,1); /* remove the error handler from the stack. */
+            /* The error is sent to the client by luaCreateFunction()
+             * itself when it returns REDIS_ERR. */
+            return;
+        }
         /* Now the following is guaranteed to return non nil */
         lua_getglobal(lua, funcname);
         redisAssert(!lua_isnil(lua,-1));
@@ -1234,14 +1239,13 @@ void evalGenericCommand(redisClient *c, int evalsha) {
         // 出错
         addReplyErrorFormat(c,"Error running script (call to %s): %s\n",
             funcname, lua_tostring(lua,-1));
-        lua_pop(lua,1); /* Consume the Lua reply. */
+        lua_pop(lua,2); /* Consume the Lua reply and remove error handler. */
     } else {
         /* On success convert the Lua return value into Redis protocol, and
-         * send it to * the client. 
-         *
-         * 执行成功，将结果转换回 Redis 回复，并返回给客户端
-         */
-        luaReplyToRedisReply(c,lua);
+         * send it to * the client.
+         * 执行成功，将结果转换回 Redis 回复，并返回给客户端 */
+        luaReplyToRedisReply(c,lua); /* Convert and consume the reply. */
+        lua_pop(lua,1); /* Remove the error handler. */
     }
 
     /* EVALSHA should be propagated to Slave and AOF file as full EVAL, unless
