@@ -954,10 +954,16 @@ struct redisServer {
     // PSYNC 成功执行的次数
     long long stat_sync_partial_ok; /* Number of accepted PSYNC requests. */
     long long stat_sync_partial_err;/* Number of unaccepted PSYNC requests. */
+
+    // 保存了所有慢查询日志的链表
     list *slowlog;                  /* SLOWLOG list of commands */
+    // 下一条慢查询日志的 ID
     long long slowlog_entry_id;     /* SLOWLOG current entry ID */
+    // 服务器配置 slowlog-log-slower-than 选项的值
     long long slowlog_log_slower_than; /* SLOWLOG time limit (to get logged) */
+    // 服务器配置 slowlog-max-len 选项的值
     unsigned long slowlog_max_len;     /* SLOWLOG max number of items logged */
+
     /* The following two are used to track instantaneous "load" in terms
      * of operations per second. */
     long long ops_sec_last_sample_time; /* Timestamp of last sample (in ms) */
@@ -998,7 +1004,7 @@ struct redisServer {
     // AOF 重写缓存链表，链接着多个缓存块
     list *aof_rewrite_buf_blocks;   /* Hold changes during an AOF rewrite. */
 
-    // AOF 缓存
+    // AOF 缓冲区
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
 
     // AOF 文件的描述符

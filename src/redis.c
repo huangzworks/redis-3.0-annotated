@@ -403,6 +403,8 @@ err:
 }
 
 /* Return the UNIX time in microseconds */
+// 返回微秒格式的 UNIX 时间
+// 1 秒 = 1 000 000 微秒
 long long ustime(void) {
     struct timeval tv;
     long long ust;
@@ -414,6 +416,8 @@ long long ustime(void) {
 }
 
 /* Return the UNIX time in milliseconds */
+// 返回毫秒格式的 UNIX 时间
+// 1 秒 = 1 000 毫秒
 long long mstime(void) {
     return ustime()/1000;
 }

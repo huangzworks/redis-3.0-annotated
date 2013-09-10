@@ -36,19 +36,20 @@
  */
 typedef struct slowlogEntry {
 
-    // 命令，以及命令的参数
+    // 命令与命令参数
     robj **argv;
 
-    // 命令参数数量
+    // 命令与命令参数的数量
     int argc;
 
     // 唯一标识符
     long long id;       /* Unique entry identifier. */
 
-    // 执行命令消耗的时间，以纳秒（1 / 1,000,000,000 秒）为单位
+    // 执行命令消耗的时间，以微秒为单位
+    // 注释里说的 nanoseconds 是错误的
     long long duration; /* Time spent by the query, in nanoseconds. */
 
-    // 命令执行时的时间
+    // 命令执行时的时间，格式为 UNIX 时间戳
     time_t time;        /* Unix time at which the query was executed. */
 
 } slowlogEntry;
