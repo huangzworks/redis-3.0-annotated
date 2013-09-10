@@ -358,7 +358,7 @@ void flushAppendOnlyFile(int force) {
     ssize_t nwritten;
     int sync_in_progress = 0;
 
-    // 没有缓存
+    // 缓冲区中没有任何内容，直接返回
     if (sdslen(server.aof_buf) == 0) return;
 
     // 策略为每秒 FSYNC 
