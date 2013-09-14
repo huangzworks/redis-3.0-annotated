@@ -2934,10 +2934,17 @@ void infoCommand(redisClient *c) {
 
 void monitorCommand(redisClient *c) {
     /* ignore MONITOR if already slave or in monitor mode */
+
+    // 这个客户端是从服务器，或者已经是监视器
     if (c->flags & REDIS_SLAVE) return;
 
+    // 打开 SLAVE 标志和 MONITOR 标志
     c->flags |= (REDIS_SLAVE|REDIS_MONITOR);
+
+    // 添加客户端到 monitors 链表
     listAddNodeTail(server.monitors,c);
+
+    // 返回 OK
     addReply(c,shared.ok);
 }
 
