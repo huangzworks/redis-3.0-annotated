@@ -694,9 +694,13 @@ typedef struct zset {
 
 } zset;
 
+// 客户端缓冲区限制
 typedef struct clientBufferLimitsConfig {
+    // 硬限制
     unsigned long long hard_limit_bytes;
+    // 软限制
     unsigned long long soft_limit_bytes;
+    // 软限制时限
     time_t soft_limit_seconds;
 } clientBufferLimitsConfig;
 
@@ -978,6 +982,9 @@ struct redisServer {
     size_t client_max_querybuf_len; /* Limit for client query buffer length */
     int dbnum;                      /* Total number of configured DBs */
     int daemonize;                  /* True if running as a daemon */
+    // 客户端输出缓冲区大小限制
+    // 数组的元素有 REDIS_CLIENT_LIMIT_NUM_CLASSES 个
+    // 每个代表一类客户端：普通、从服务器、pubsub，诸如此类
     clientBufferLimitsConfig client_obuf_limits[REDIS_CLIENT_LIMIT_NUM_CLASSES];
     /* AOF persistence */
 

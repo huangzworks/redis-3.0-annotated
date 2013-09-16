@@ -90,12 +90,15 @@ void loadServerConfigFromString(char *config) {
         int argc;
 
         linenum = i+1;
+        // 移除字符串的前置空白和后缀空白
         lines[i] = sdstrim(lines[i]," \t\r\n");
 
         /* Skip comments and blank lines */
+        // 跳过空白行
         if (lines[i][0] == '#' || lines[i][0] == '\0') continue;
 
         /* Split into arguments */
+        // 将字符串分割成多个参数
         argv = sdssplitargs(lines[i],&argc);
         if (argv == NULL) {
             err = "Unbalanced quotes in configuration line";
@@ -103,10 +106,14 @@ void loadServerConfigFromString(char *config) {
         }
 
         /* Skip this line if the resulting command vector is empty. */
+        // 跳过空白参数
         if (argc == 0) {
             sdsfreesplitres(argv,argc);
             continue;
         }
+
+        // 将选项名字转换成小写
+        // 例如 TIMEOUT 转换成 timeout
         sdstolower(argv[0]);
 
         /* Execute config directives */
@@ -476,11 +483,14 @@ void loadServerConfigFromString(char *config) {
         } else if (!strcasecmp(argv[0],"sentinel")) {
             /* argc == 1 is handled by main() as we need to enter the sentinel
              * mode ASAP. */
+            // 如果 SENTINEL 命令不为空，那么执行以下代码
             if (argc != 1) {
+                // 如果 SENTINEL 模式未开启，那么出错
                 if (!server.sentinel_mode) {
                     err = "sentinel directive while not in sentinel mode";
                     goto loaderr;
                 }
+                // 载入 SENTINEL 相关选项
                 err = sentinelHandleConfiguration(argv+1,argc-1);
                 if (err) goto loaderr;
             }
@@ -507,17 +517,27 @@ loaderr:
 }
 
 /* Load the server configuration from the specified filename.
+ *
+ * 从给定文件中载入服务器配置。
+ *
  * The function appends the additional configuration directives stored
  * in the 'options' string to the config file before loading.
  *
+ * options 字符串会被追加到文件所载入的内容的后面。
+ *
  * Both filename and options can be NULL, in such a case are considered
  * empty. This way loadServerConfig can be used to just load a file or
- * just load a string. */
+ * just load a string. 
+ *
+ * filename 和 options 都可以是 NULL ，在这种情况下，
+ * 服务器配置文件视为空文件。
+ */
 void loadServerConfig(char *filename, char *options) {
     sds config = sdsempty();
     char buf[REDIS_CONFIGLINE_MAX+1];
 
     /* Load the file content */
+    // 载入文件内容
     if (filename) {
         FILE *fp;
 
@@ -534,12 +554,17 @@ void loadServerConfig(char *filename, char *options) {
             config = sdscat(config,buf);
         if (fp != stdin) fclose(fp);
     }
+
     /* Append the additional options */
+    // 追加 options 字符串到内容的末尾
     if (options) {
         config = sdscat(config,"\n");
         config = sdscat(config,options);
     }
+
+    // 根据字符串内容，设置服务器配置
     loadServerConfigFromString(config);
+
     sdsfree(config);
 }
 
