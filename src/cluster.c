@@ -45,7 +45,7 @@ void clusterSendFail(char *nodename);
 void clusterSendFailoverAuthIfNeeded(clusterNode *sender);
 void clusterUpdateState(void);
 int clusterNodeGetSlotBit(clusterNode *n, int slot);
-sds clusterGenNodesDescription(void);
+sds clusterGenNodesDescription(int filter);
 clusterNode *clusterLookupNode(char *name);
 int clusterNodeAddSlave(clusterNode *master, clusterNode *slave);
 int clusterAddSlot(clusterNode *n, int slot);
@@ -203,7 +203,7 @@ fmterr:
  * This function writes the node config and returns 0, on error -1
  * is returned. */
 int clusterSaveConfig(void) {
-    sds ci = clusterGenNodesDescription();
+    sds ci = clusterGenNodesDescription(REDIS_NODE_HANDSHAKE);
     int fd;
     
     if ((fd = open(server.cluster_configfile,O_WRONLY|O_CREAT|O_TRUNC,0644))
@@ -359,6 +359,7 @@ clusterNode *createClusterNode(char *nodename, int flags) {
         memcpy(node->name, nodename, REDIS_CLUSTER_NAMELEN);
     else
         getRandomHexChars(node->name, REDIS_CLUSTER_NAMELEN);
+    node->ctime = time(NULL);
     node->flags = flags;
     memset(node->slots,0,sizeof(node->slots));
     node->numslots = 0;
@@ -545,7 +546,7 @@ void clusterDelNode(clusterNode *delnode) {
     }
 
     /* 2) Remove failure reports. */
-    di = dictGetIterator(server.cluster->nodes);
+    di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
 
@@ -673,6 +674,24 @@ void clearNodeFailureIfNeeded(clusterNode *node) {
     }
 }
 
+/* Return true if we already have a node in HANDSHAKE state matching the
+ * specified ip address and port number. This function is used in order to
+ * avoid adding a new handshake node for the same address multiple times. */
+int clusterHandshakeInProgress(char *ip, int port) {
+    dictIterator *di;
+    dictEntry *de;
+
+    di = dictGetSafeIterator(server.cluster->nodes);
+    while((de = dictNext(di)) != NULL) {
+        clusterNode *node = dictGetVal(de);
+
+        if (!(node->flags & REDIS_NODE_HANDSHAKE)) continue;
+        if (!strcasecmp(node->ip,ip) && node->port == port) break;
+    }
+    dictReleaseIterator(di);
+    return de != NULL;
+}
+
 /* Process the gossip section of PING or PONG packets.
  * Note that this function assumes that the packet is already sanity-checked
  * by the caller, not in the content of the gossip section, but in the
@@ -735,7 +754,9 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
              * Note that we require that the sender of this gossip message
              * is a well known node in our cluster, otherwise we risk
              * joining another cluster. */
-            if (sender && !(flags & REDIS_NODE_NOADDR)) {
+            if (sender && !(flags & REDIS_NODE_NOADDR) &&
+                !clusterHandshakeInProgress(g->ip,ntohs(g->port)))
+            {
                 clusterNode *newnode;
 
                 redisLog(REDIS_DEBUG,"Adding the new node");
@@ -1234,7 +1255,7 @@ void clusterBroadcastMessage(void *buf, size_t len) {
     dictIterator *di;
     dictEntry *de;
 
-    di = dictGetIterator(server.cluster->nodes);
+    di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
 
@@ -1346,7 +1367,7 @@ void clusterBroadcastPong(void) {
     dictIterator *di;
     dictEntry *de;
 
-    di = dictGetIterator(server.cluster->nodes);
+    di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
 
@@ -1588,6 +1609,16 @@ void clusterCron(void) {
         clusterNode *node = dictGetVal(de);
 
         if (node->flags & (REDIS_NODE_MYSELF|REDIS_NODE_NOADDR)) continue;
+
+        /* A Node in HANDSHAKE state has a limited lifespan equal to the
+         * configured node timeout. */
+        if (node->flags & REDIS_NODE_HANDSHAKE &&
+            server.unixtime - node->ctime > server.cluster_node_timeout)
+        {
+            freeClusterNode(node);
+            continue;
+        }
+
         if (node->link == NULL) {
             int fd;
             time_t old_ping_sent;
@@ -1647,7 +1678,7 @@ void clusterCron(void) {
     }
 
     /* Iterate nodes to check if we need to flag something as failing */
-    di = dictGetIterator(server.cluster->nodes);
+    di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
         time_t now = time(NULL);
@@ -1849,7 +1880,7 @@ void clusterUpdateState(void) {
         dictEntry *de;
 
         server.cluster->size = 0;
-        di = dictGetIterator(server.cluster->nodes);
+        di = dictGetSafeIterator(server.cluster->nodes);
         while((de = dictNext(di)) != NULL) {
             clusterNode *node = dictGetVal(de);
 
@@ -1972,15 +2003,29 @@ void clusterSetMaster(clusterNode *n) {
  * CLUSTER command
  * -------------------------------------------------------------------------- */
 
-sds clusterGenNodesDescription(void) {
+/* Generate a csv-alike representation of the nodes we are aware of,
+ * including the "myself" node, and return an SDS string containing the
+ * representation (it is up to the caller to free it).
+ *
+ * All the nodes matching at least one of the node flags specified in
+ * "filter" are excluded from the output, so using zero as a filter will
+ * include all the known nodes in the representation, including nodes in
+ * the HANDSHAKE state.
+ *
+ * The representation obtained using this function is used for the output
+ * of the CLUSTER NODES function, and as format for the cluster
+ * configuration file (nodes.conf) for a given node. */
+sds clusterGenNodesDescription(int filter) {
     sds ci = sdsempty();
     dictIterator *di;
     dictEntry *de;
     int j, start;
 
-    di = dictGetIterator(server.cluster->nodes);
+    di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
+
+        if (node->flags & filter) continue;
 
         /* Node coordinates */
         ci = sdscatprintf(ci,"%.40s %s:%d ",
@@ -2117,7 +2162,7 @@ void clusterCommand(redisClient *c) {
     } else if (!strcasecmp(c->argv[1]->ptr,"nodes") && c->argc == 2) {
         /* CLUSTER NODES */
         robj *o;
-        sds ci = clusterGenNodesDescription();
+        sds ci = clusterGenNodesDescription(0);
 
         o = createObject(REDIS_STRING,ci);
         addReplyBulk(c,o);
@@ -2300,6 +2345,14 @@ void clusterCommand(redisClient *c) {
             (unsigned long)sdslen(info)));
         addReplySds(c,info);
         addReply(c,shared.crlf);
+    } else if (!strcasecmp(c->argv[1]->ptr,"saveconfig") && c->argc == 2) {
+        int retval = clusterSaveConfig();
+
+        if (retval == 0)
+            addReply(c,shared.ok);
+        else
+            addReplyErrorFormat(c,"error saving the cluster node config: %s",
+                strerror(errno));
     } else if (!strcasecmp(c->argv[1]->ptr,"keyslot") && c->argc == 3) {
         /* CLUSTER KEYSLOT <key> */
         sds key = c->argv[2]->ptr;
