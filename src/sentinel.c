@@ -203,7 +203,7 @@ typedef struct sentinelRedisInstance {
     // 实例被判断为 ODOWN 状态的时间
     mstime_t o_down_since_time; /* Objectively down since time. */
 
-    // 实例无响应多久才会被判断为下线，
+    // 实例无响应多少毫秒之后才会被判断为主观下线（subjectively down）
     // 也即是 SENTINEL down-after-milliseconds 选项所设定的值
     mstime_t down_after_period; /* Consider it down after that period. */
 
@@ -216,10 +216,10 @@ typedef struct sentinelRedisInstance {
     // 其他同样监控这个主服务器的所有 sentinel
     dict *sentinels;    /* Other sentinels monitoring the same master. */
 
-    // 这个主服务器的所有从服务器（仅在实例为主服务器时使用）
+    // 这个主服务器的所有从服务器
     dict *slaves;       /* Slaves for this master instance. */
 
-    // 判断这个主服务器失效所需的 sentinel 数量
+    // 判断这个实例为主观下线所需的 Sentinel 数量
     // 也即是 SENTINEL monitor <master-name> <IP> <port> <quorum> 选项中的 quorum 参数
     int quorum;         /* Number of sentinels that need to agree on failure. */
 
@@ -277,9 +277,10 @@ typedef struct sentinelRedisInstance {
     // 故障转移开始的时间
     mstime_t failover_start_time;   /* When to start to failover if leader. */
 
-    // 故障转移状态之间的变幻所能接受的最大时间
-    // 超过这个时间状态也不改变，表示故障转移操作进度中止，或者过分缓慢
-    // 也即是 SENTINEL failover-timeout <master-name> <ms> 选项的值
+    // 故障转移操作的最大执行时长
+    // 另外，如果每次故障转移状态切换的间隔超过这个值的 25%
+    // 那么故障转移操作也会被视为超时
+    // 这是 SENTINEL failover-timeout <master-name> <ms> 选项的值
     mstime_t failover_timeout;      /* Max time to refresh failover state. */
 
     // 指向被提升为新主服务器的从服务器的指针
@@ -302,24 +303,26 @@ typedef struct sentinelRedisInstance {
 struct sentinelState {
 
     // 保存了所有被这个 sentinel 监视的主服务器
-    // 字典的键是主服务器的名字，值则是一个指向 sentinelRedisInstance 结构的指针
+    // 字典的键是主服务器的名字
+    // 字典的值则是一个指向 sentinelRedisInstance 结构的指针
     dict *masters;      /* Dictionary of master sentinelRedisInstances.
                            Key is the instance name, value is the
                            sentinelRedisInstance structure pointer. */
 
-    // 是否进入了 TILT 模式
+    // 是否进入了 TILT 模式？
     int tilt;           /* Are we in TILT mode? */
 
-    // 现在正在执行的脚本的数量
+    // 目前正在执行的脚本的数量
     int running_scripts;    /* Number of scripts in execution right now. */
 
     // 进入 TILT 模式的时间
     mstime_t tilt_start_time;   /* When TITL started. */
 
     // 上一次运行 sentinel 程序的时间
+    // 用于检查是否进入 TILT 模式
     mstime_t previous_time;     /* Time last time we ran the time handler. */
 
-    // 需要执行的脚本的队列
+    // 一个 FIFO 队列，包含了所有需要执行的用户脚本
     list *scripts_queue;    /* Queue of user scripts to execute. */
 
 } sentinel;
@@ -2000,6 +2003,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
 
             /* Check if we already have this slave into our table,
              * otherwise add it. */
+            // 如果发现有新的从服务器出现，那么为它添加实例
             if (sentinelRedisInstanceLookupSlave(ri,ip,atoi(port)) == NULL) {
                 if ((slave = createSentinelRedisInstance(NULL,SRI_SLAVE,ip,
                             atoi(port), ri->quorum, ri)) != NULL)
@@ -3279,7 +3283,7 @@ char *sentinelGetObjectiveLeader(sentinelRedisInstance *master) {
     }
 
     /* Count other sentinels votes */
-    // 投机其他 sentinel 的主观 leader 投票
+    // 统计其他 sentinel 的主观 leader 投票
     di = dictGetIterator(master->sentinels);
     while((de = dictNext(di)) != NULL) {
         sentinelRedisInstance *ri = dictGetVal(de);
@@ -4278,7 +4282,7 @@ void sentinelHandleDictOfRedisInstances(dict *instances) {
  * 通常来说，两次执行 sentinel 之间的差会在 100 毫秒左右，
  * 但当出现以下内容时，这个差就可能会出现异常：
  *
- * 1) The Sentiel process for some time is blocked, for every kind of
+ * 1) The Sentinel process for some time is blocked, for every kind of
  * random reason: the load is huge, the computer was frozen for some time
  * in I/O or alike, the process was stopped by a signal. Everything.
  *
