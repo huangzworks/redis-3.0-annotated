@@ -146,6 +146,9 @@ typedef struct sentinelRedisInstance {
     int flags;      /* See SRI_... defines */
     
     // 实例的名字
+    // 主服务器的名字由用户在配置文件中设置
+    // 从服务器以及 Sentinel 的名字由 Sentinel 自动设置
+    // 格式为 ip:port ，例如 "127.0.0.1:26379"
     char *name;     /* Master name from the point of view of this sentinel. */
 
     // 实例的运行 ID
@@ -203,8 +206,8 @@ typedef struct sentinelRedisInstance {
     // 实例被判断为 ODOWN 状态的时间
     mstime_t o_down_since_time; /* Objectively down since time. */
 
+    // SENTINEL down-after-milliseconds 选项所设定的值
     // 实例无响应多少毫秒之后才会被判断为主观下线（subjectively down）
-    // 也即是 SENTINEL down-after-milliseconds 选项所设定的值
     mstime_t down_after_period; /* Consider it down after that period. */
 
     // 从实例获取 INFO 命令的回复的时间
@@ -219,12 +222,12 @@ typedef struct sentinelRedisInstance {
     // 这个主服务器的所有从服务器
     dict *slaves;       /* Slaves for this master instance. */
 
-    // 判断这个实例为主观下线所需的 Sentinel 数量
-    // 也即是 SENTINEL monitor <master-name> <IP> <port> <quorum> 选项中的 quorum 参数
+    // SENTINEL monitor <master-name> <IP> <port> <quorum> 选项中的 quorum 参数
+    // 判断这个实例为主观下线所需的支持投票数量
     int quorum;         /* Number of sentinels that need to agree on failure. */
 
-    // 在执行故障转移操作时，可以同时对主服务器进行同步的从服务器数量
-    // 也即是 SENTINEL parallel-syncs <master-name> <number> 选项的值
+    // SENTINEL parallel-syncs <master-name> <number> 选项的值
+    // 在执行故障转移操作时，可以同时对新的主服务器进行同步的从服务器数量
     int parallel_syncs; /* How many slaves to reconfigure at same time. */
 
     // 连接主服务器和从服务器所需的密码
@@ -245,7 +248,7 @@ typedef struct sentinelRedisInstance {
     // 指向主服务器实例的指针
     struct sentinelRedisInstance *master; /* Master instance if SRI_SLAVE is set. */
 
-    // INFO 命令的回复中记录的主服务器 hostname 
+    // INFO 命令的回复中记录的主服务器 IP
     char *slave_master_host;    /* Master host as reported by INFO */
     
     // INFO 命令的回复中记录的主服务器端口号
@@ -277,10 +280,10 @@ typedef struct sentinelRedisInstance {
     // 故障转移开始的时间
     mstime_t failover_start_time;   /* When to start to failover if leader. */
 
+    // SENTINEL failover-timeout <master-name> <ms> 选项的值
     // 故障转移操作的最大执行时长
-    // 另外，如果每次故障转移状态切换的间隔超过这个值的 25%
+    // 另外，如果故障转移操作停留在某个状态的时间超过这个值的 25%
     // 那么故障转移操作也会被视为超时
-    // 这是 SENTINEL failover-timeout <master-name> <ms> 选项的值
     mstime_t failover_timeout;      /* Max time to refresh failover state. */
 
     // 指向被提升为新主服务器的从服务器的指针
@@ -2416,7 +2419,7 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
             // sentinel 是否可以执行故障转移
             canfailover = atoi(token[3]);
 
-            // 根据 runid ，获取 sentinel
+            // 根据 IP 、端口和 runid ，获取 sentinel
             sentinel = getSentinelRedisInstanceByAddrAndRunID(
                             ri->sentinels,token[0],port,token[2]);
 
