@@ -223,7 +223,7 @@ typedef struct sentinelRedisInstance {
     dict *slaves;       /* Slaves for this master instance. */
 
     // SENTINEL monitor <master-name> <IP> <port> <quorum> 选项中的 quorum 参数
-    // 判断这个实例为主观下线所需的支持投票数量
+    // 判断这个实例为客观下线（objectively down）所需的支持投票数量
     int quorum;         /* Number of sentinels that need to agree on failure. */
 
     // SENTINEL parallel-syncs <master-name> <number> 选项的值
