@@ -2997,12 +2997,13 @@ void sentinelCheckObjectivelyDown(sentinelRedisInstance *master) {
     dictEntry *de;
     int quorum = 0, odown = 0;
 
-    // 统计所有 SENTINEL 的意见，判断 master 是否进入 ODWN
+    // 统计所有 SENTINEL 的意见，判断 master 是否进入下线状态
+    // 这里的下线可以是主观下线或者客观下线
     if (master->flags & SRI_S_DOWN) {
         /* Is down for enough sentinels? */
         quorum = 1; /* the current sentinel. */
         /* Count all the other sentinels. */
-        // 统计其他认为 master 进入 SDOWN 状态的 SENTINEL 的数量
+        // 统计其他认为 master 进入下线状态的 SENTINEL 的数量
         di = dictGetIterator(master->sentinels);
         while((de = dictNext(di)) != NULL) {
             sentinelRedisInstance *ri = dictGetVal(de);
@@ -4188,7 +4189,7 @@ void sentinelHandleRedisInstance(sentinelRedisInstance *ri) {
     }
 
     /* Every kind of instance */
-    // 检查所有实例是否进入 SDOWN 状态
+    // 检查给定实例是否进入 SDOWN 状态
     sentinelCheckSubjectivelyDown(ri);
 
     /* Masters and slaves */
