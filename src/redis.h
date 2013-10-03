@@ -502,7 +502,7 @@ typedef struct readyList {
  */
 typedef struct redisClient {
 
-    // 套接字
+    // 套接字描述符
     int fd;
 
     // 当前正在使用的数据库
@@ -526,6 +526,7 @@ typedef struct redisClient {
     // 参数对象数组
     robj **argv;
 
+    // 记录被客户端执行的命令
     struct redisCommand *cmd, *lastcmd;
 
     // 请求的类型：内联命令还是多条命令
@@ -549,10 +550,14 @@ typedef struct redisClient {
 
     // 创建客户端的时间
     time_t ctime;           /* Client creation time */
+
     // 客户端最后一次和服务器互动的时间
     time_t lastinteraction; /* time of the last interaction, used for timeout */
 
+    // 客户端的输出缓冲区超过软性限制的时间
     time_t obuf_soft_limit_reached_time;
+
+    // 客户端状态标志
     int flags;              /* REDIS_SLAVE | REDIS_MONITOR | REDIS_MULTI ... */
 
     // 当 server.requirepass 不为 NULL 时
@@ -615,9 +620,15 @@ typedef struct redisClient {
 
 } redisClient;
 
+// 服务器的保存条件（BGSAVE 自动执行的条件）
 struct saveparam {
+
+    // 多少秒之内
     time_t seconds;
+
+    // 发生多少次修改
     int changes;
+
 };
 
 struct sharedObjectsStruct {
@@ -922,6 +933,7 @@ struct redisServer {
     int sofd;                   /* Unix socket file descriptor */
     int cfd[REDIS_BINDADDR_MAX];/* Cluster bus listening socket */
     int cfd_count;              /* Used slots in cfd[] */
+    // 一个链表，保存了所有客户端状态结构
     list *clients;              /* List of active clients */
     list *clients_to_close;     /* Clients to close asynchronously */
     list *slaves, *monitors;    /* List of slaves and MONITORs */

@@ -1044,14 +1044,26 @@ int clientsCronHandleTimeout(redisClient *c) {
 /* The client query buffer is an sds.c string that can end with a lot of
  * free space not used, this function reclaims space if needed.
  *
- * The function always returns 0 as it never terminates the client. */
+ * 根据情况，缩小查询缓冲区的大小。
+ *
+ * The function always returns 0 as it never terminates the client. 
+ *
+ * 函数总是返回 0 ，因为它不会中止客户端。
+ */
 int clientsCronResizeQueryBuffer(redisClient *c) {
     size_t querybuf_size = sdsAllocSize(c->querybuf);
     time_t idletime = server.unixtime - c->lastinteraction;
 
     /* There are two conditions to resize the query buffer:
+     *
+     * 符合以下两个条件的话，执行大小调整：
+     *
      * 1) Query buffer is > BIG_ARG and too big for latest peak.
-     * 2) Client is inactive and the buffer is bigger than 1k. */
+     *    查询缓冲区的大小大于 BIG_ARG 以及 querybuf_peak
+     *
+     * 2) Client is inactive and the buffer is bigger than 1k. 
+     *    客户端不活跃，并且缓冲区大于 1k 。
+     */
     if (((querybuf_size > REDIS_MBULK_BIG_ARG) &&
          (querybuf_size/(c->querybuf_peak+1)) > 2) ||
          (querybuf_size > 1024 && idletime > 2))
@@ -1061,9 +1073,12 @@ int clientsCronResizeQueryBuffer(redisClient *c) {
             c->querybuf = sdsRemoveFreeSpace(c->querybuf);
         }
     }
+
     /* Reset the peak again to capture the peak memory usage in the next
      * cycle. */
+    // 重置峰值
     c->querybuf_peak = 0;
+
     return 0;
 }
 
@@ -1092,6 +1107,7 @@ void clientsCron(void) {
          * The protocol is that they return non-zero if the client was
          * terminated. */
         if (clientsCronHandleTimeout(c)) continue;
+        // 根据情况，缩小客户端查询缓冲区的大小
         if (clientsCronResizeQueryBuffer(c)) continue;
     }
 }

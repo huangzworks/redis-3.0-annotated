@@ -996,6 +996,7 @@ void freeClientAsync(redisClient *c) {
     listAddNodeTail(server.clients_to_close,c);
 }
 
+// 关闭需要异步关闭的客户端
 void freeClientsInAsyncFreeQueue(void) {
     while (listLength(server.clients_to_close)) {
         listNode *ln = listFirst(server.clients_to_close);
@@ -1843,14 +1844,25 @@ void rewriteClientCommandArgument(redisClient *c, int i, robj *newval) {
  * It is "virtual" since the reply output list may contain objects that
  * are shared and are not really using additional memory.
  *
+ * 函数返回客用于保存目前仍未返回给客户端的回复的虚拟大小（以字节为单位）。
+ * 之所以说是虚拟大小，因为回复列表中可能有包含共享的对象。
+ *
  * The function returns the total sum of the length of all the objects
  * stored in the output list, plus the memory used to allocate every
  * list node. The static reply buffer is not taken into account since it
  * is allocated anyway.
  *
+ * 函数返回回复列表中所包含的全部对象的体积总和，
+ * 加上列表节点所分配的空间。
+ * 静态回复缓冲区不会被计算在内，因为它总是会被分配的。
+ *
  * Note: this function is very fast so can be called as many time as
  * the caller wishes. The main usage of this function currently is
- * enforcing the client output length limits. */
+ * enforcing the client output length limits. 
+ *
+ * 注意：这个函数的速度很快，所以它可以被随意地调用多次。
+ * 这个函数目前的主要作用就是用来强制客户端输出长度限制。
+ */
 unsigned long getClientOutputBufferMemoryUsage(redisClient *c) {
     unsigned long list_item_size = sizeof(listNode)+sizeof(robj);
 
@@ -1860,10 +1872,20 @@ unsigned long getClientOutputBufferMemoryUsage(redisClient *c) {
 /* Get the class of a client, used in order to enforce limits to different
  * classes of clients.
  *
+ * 获取客户端的类型，用于对不同类型的客户端应用不同的限制。
+ *
  * The function will return one of the following:
+ * 
+ * 函数将返回以下三个值的其中一个：
+ *
  * REDIS_CLIENT_LIMIT_CLASS_NORMAL -> Normal client
+ *                                    普通客户端
+ *
  * REDIS_CLIENT_LIMIT_CLASS_SLAVE  -> Slave or client executing MONITOR command
+ *                                    从服务器，或者正在执行 MONITOR 命令的客户端
+ *
  * REDIS_CLIENT_LIMIT_CLASS_PUBSUB -> Client subscribed to Pub/Sub channels
+ *                                    正在进行订阅操作（SUBSCRIBE/PSUBSCRIBE）的客户端
  */
 int getClientLimitClass(redisClient *c) {
     if (c->flags & REDIS_SLAVE) return REDIS_CLIENT_LIMIT_CLASS_SLAVE;
@@ -1872,6 +1894,7 @@ int getClientLimitClass(redisClient *c) {
     return REDIS_CLIENT_LIMIT_CLASS_NORMAL;
 }
 
+// 根据名字，获取客户端的类型常量
 int getClientLimitClassByName(char *name) {
     if (!strcasecmp(name,"normal")) return REDIS_CLIENT_LIMIT_CLASS_NORMAL;
     else if (!strcasecmp(name,"slave")) return REDIS_CLIENT_LIMIT_CLASS_SLAVE;
@@ -1879,6 +1902,7 @@ int getClientLimitClassByName(char *name) {
     else return -1;
 }
 
+// 根据客户端的类型，获取名字
 char *getClientLimitClassName(int class) {
     switch(class) {
     case REDIS_CLIENT_LIMIT_CLASS_NORMAL:   return "normal";
@@ -1892,29 +1916,53 @@ char *getClientLimitClassName(int class) {
  * limit, and also update the state needed to check the soft limit as
  * a side effect.
  *
+ * 这个函数检查客户端是否达到了输出缓冲区的软性（soft）限制或者硬性（hard）限制，
+ * 并在到达软限制时，对客户端进行标记。
+ *
  * Return value: non-zero if the client reached the soft or the hard limit.
- *               Otherwise zero is returned. */
+ *               Otherwise zero is returned. 
+ *
+ * 返回值：到达软性限制或者硬性限制时，返回非 0 值。
+ *         否则返回 0 。
+ */
 int checkClientOutputBufferLimits(redisClient *c) {
     int soft = 0, hard = 0, class;
+
+    // 获取客户端回复缓冲区的大小
     unsigned long used_mem = getClientOutputBufferMemoryUsage(c);
 
+    // 获取客户端的限制大小
     class = getClientLimitClass(c);
+
+    // 检查软性限制
     if (server.client_obuf_limits[class].hard_limit_bytes &&
         used_mem >= server.client_obuf_limits[class].hard_limit_bytes)
         hard = 1;
+
+    // 检查硬性限制
     if (server.client_obuf_limits[class].soft_limit_bytes &&
         used_mem >= server.client_obuf_limits[class].soft_limit_bytes)
         soft = 1;
 
     /* We need to check if the soft limit is reached continuously for the
      * specified amount of seconds. */
+    // 达到软性限制
     if (soft) {
+
+        // 第一次达到软性限制
         if (c->obuf_soft_limit_reached_time == 0) {
+            // 记录时间
             c->obuf_soft_limit_reached_time = server.unixtime;
+            // 关闭软性限制 flag
             soft = 0; /* First time we see the soft limit reached */
+
+        // 再次达到软性限制
         } else {
+            // 软性限制的连续时长
             time_t elapsed = server.unixtime - c->obuf_soft_limit_reached_time;
 
+            // 如果没有超过最大连续时长的话，那么关闭软性限制 flag
+            // 如果超过了最大连续时长的话，软性限制 flag 就会被保留
             if (elapsed <=
                 server.client_obuf_limits[class].soft_limit_seconds) {
                 soft = 0; /* The client still did not reached the max number of
@@ -1923,8 +1971,10 @@ int checkClientOutputBufferLimits(redisClient *c) {
             }
         }
     } else {
+        // 未达到软性限制，或者已脱离软性限制，那么清空软性限制的进入时间
         c->obuf_soft_limit_reached_time = 0;
     }
+
     return soft || hard;
 }
 
@@ -1932,15 +1982,28 @@ int checkClientOutputBufferLimits(redisClient *c) {
  * output buffer size. The caller can check if the client will be closed
  * checking if the client REDIS_CLOSE_ASAP flag is set.
  *
+ * 如果客户端达到缓冲区大小的软性或者硬性限制，那么打开客户端的 ``REDIS_CLOSE_ASAP`` 状态，
+ * 让服务器异步地关闭客户端。
+ *
  * Note: we need to close the client asynchronously because this function is
  * called from contexts where the client can't be freed safely, i.e. from the
- * lower level functions pushing data inside the client output buffers. */
+ * lower level functions pushing data inside the client output buffers. 
+ *
+ * 注意：
+ * 我们不能直接关闭客户端，而要异步关闭的原因是客户端正处于一个不能被安全地关闭的上下文中。
+ * 比如说，可能有底层函数正在推入数据到客户端的输出缓冲区里面。      
+ */
 void asyncCloseClientOnOutputBufferLimitReached(redisClient *c) {
     redisAssert(c->reply_bytes < ULONG_MAX-(1024*64));
+
+    // 已经被标记了
     if (c->reply_bytes == 0 || c->flags & REDIS_CLOSE_ASAP) return;
+
+    // 检查限制
     if (checkClientOutputBufferLimits(c)) {
         sds client = getClientInfoString(c);
 
+        // 异步关闭
         freeClientAsync(c);
         redisLog(REDIS_WARNING,"Client %s scheduled to be closed ASAP for overcoming of output buffer limits.", client);
         sdsfree(client);
@@ -1949,6 +2012,8 @@ void asyncCloseClientOnOutputBufferLimitReached(redisClient *c) {
 
 /* Helper function used by freeMemoryIfNeeded() in order to flush slaves
  * output buffers without returning control to the event loop. */
+// freeMemoryIfNeeded() 函数的辅助函数，
+// 用于在不进入事件循环的情况下，冲洗所有从服务器的输出缓冲区。
 void flushSlavesOutputBuffers(void) {
     listIter li;
     listNode *ln;
