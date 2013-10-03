@@ -128,7 +128,7 @@ redisClient *createClient(int fd) {
     c->multibulklen = 0;
     // 读入的参数的长度
     c->bulklen = -1;
-    //
+    // 已发送字节数
     c->sentlen = 0;
     // 状态 FLAG
     c->flags = 0;

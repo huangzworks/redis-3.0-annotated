@@ -1223,6 +1223,8 @@ struct redisServer {
     clusterState *cluster;  /* State of the cluster */
     /* Scripting */
     lua_State *lua; /* The Lua interpreter. We use just one for all clients */
+    
+    // 复制执行 Lua 脚本中的 Redis 命令的伪客户端
     redisClient *lua_client;   /* The "fake client" to query Redis from Lua */
     redisClient *lua_caller;   /* The client running EVAL right now, or NULL */
     dict *lua_scripts;         /* A dictionary of SHA1 -> Lua scripts */
