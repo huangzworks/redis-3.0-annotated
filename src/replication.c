@@ -862,7 +862,7 @@ void updateSlavesWaitingBgsave(int bgsaveerr) {
         }
     }
 
-    // 需要为 slave 开始行的 BGSAVE
+    // 需要执行新的 BGSAVE
     if (startbgsave) {
         /* Since we are starting a new background save for one or more slaves,
          * we flush the Replication Script Cache to use EVAL to propagate every
