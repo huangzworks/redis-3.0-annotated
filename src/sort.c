@@ -126,6 +126,8 @@ robj *lookupKeyByPattern(redisDb *db, robj *pattern, robj *subst) {
 	// 根据模式，进行替换
 	// 比如说， subst 为 www ，模式为 nono_happ_*
 	// 那么替换结果就是 nono_happ_www
+    // 又比如说， subst 为 peter ，模式为 *-info->age
+    // 那么替换结果就是 peter-info->age
     prefixlen = p-spat;
     sublen = sdslen(ssub);
     postfixlen = sdslen(spat)-(prefixlen+1)-(fieldlen ? fieldlen+2 : 0);
