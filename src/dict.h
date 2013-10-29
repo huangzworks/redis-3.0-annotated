@@ -185,6 +185,8 @@ typedef struct dictIterator {
     long long fingerprint; /* unsafe iterator fingerprint for misuse detection */
 } dictIterator;
 
+typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
+
 /* This is the initial size of every hash table */
 /*
  * 哈希表的初始大小
@@ -277,6 +279,7 @@ int dictRehash(dict *d, int n);
 int dictRehashMilliseconds(dict *d, int ms);
 void dictSetHashFunctionSeed(unsigned int initval);
 unsigned int dictGetHashFunctionSeed(void);
+unsigned long dictScan(dict *d, unsigned long v, dictScanFunction *fn, void *privdata);
 
 /* Hash table types */
 extern dictType dictTypeHeapStringCopyKey;

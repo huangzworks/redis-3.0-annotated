@@ -1118,10 +1118,13 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
         }
     }
 
-    // 如果有信息被写入，那么更新客户端的最后互动时间
-    if (totwritten > 0) c->lastinteraction = server.unixtime;
-
-    // 如果所有内容都已被写入完毕，那么删除 write handler
+    if (totwritten > 0) {
+        /* For clients representing masters we don't count sending data
+         * as an interaction, since we always send REPLCONF ACK commands
+         * that take some time to just fill the socket output buffer.
+         * We just rely on data / pings received for timeout detection. */
+        if (!(c->flags & REDIS_MASTER)) c->lastinteraction = server.unixtime;
+    }
     if (c->bufpos == 0 && listLength(c->reply) == 0) {
         c->sentlen = 0;
 
