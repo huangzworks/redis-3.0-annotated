@@ -577,6 +577,25 @@ void scanCallback(void *privdata, const dictEntry *de) {
     if (val) listAddNodeTail(keys, val);
 }
 
+/* Try to parse a SCAN cursor stored at object 'o':
+ * if the cursor is valid, store it as unsigned integer into *cursor and
+ * returns REDIS_OK. Otherwise return REDIS_ERR and send an error to the
+ * client. */
+int parseScanCursorOrReply(redisClient *c, robj *o, unsigned long *cursor) {
+    char *eptr;
+
+    /* Use strtoul() because we need an *unsigned* long, so
+     * getLongLongFromObject() does not cover the whole cursor space. */
+    errno = 0;
+    *cursor = strtoul(o->ptr, &eptr, 10);
+    if (isspace(((char*)o->ptr)[0]) || eptr[0] != '\0' || errno == ERANGE)
+    {
+        addReplyError(c, "invalid cursor");
+        return REDIS_ERR;
+    }
+    return REDIS_OK;
+}
+
 /* This command implements SCAN, HSCAN and SSCAN commands.
  * If object 'o' is passed, then it must be an Hash or Set object, otherwise
  * if 'o' is NULL the command will operate on the dictionary associated with
@@ -588,16 +607,15 @@ void scanCallback(void *privdata, const dictEntry *de) {
  *
  * In the case of an Hash object the function returns both the field and value
  * of every element on the Hash. */
-void scanGenericCommand(redisClient *c, robj *o) {
+void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
     int rv;
     int i, j;
     char buf[REDIS_LONGSTR_SIZE];
     list *keys = listCreate();
     listNode *node, *nextnode;
-    unsigned long cursor = 0;
     long count = 10;
     sds pat;
-    int patlen, patnoop = 1;
+    int patlen, use_pattern = 0;
     dict *ht;
 
     /* Object must be NULL (to iterate keys names), or the type of the object
@@ -607,13 +625,6 @@ void scanGenericCommand(redisClient *c, robj *o) {
 
     /* Set i to the first option argument. The previous one is the cursor. */
     i = (o == NULL) ? 2 : 3; /* Skip the key argument if needed. */
-
-    /* Use sscanf because we need an *unsigned* long */
-    rv = sscanf(c->argv[i-1]->ptr, "%lu", &cursor);
-    if (rv != 1) {
-        addReplyError(c, "invalid cursor");
-        goto cleanup;
-    }
 
     /* Step 1: Parse options. */
     while (i < c->argc) {
@@ -635,8 +646,9 @@ void scanGenericCommand(redisClient *c, robj *o) {
             pat = c->argv[i+1]->ptr;
             patlen = sdslen(pat);
 
-            /* The pattern is a no-op iff == "*" */
-            patnoop = (pat[0] == '*' && patlen == 1);
+            /* The pattern always matches if it is exactly "*", so it is
+             * equivalent to disabling it. */
+            use_pattern = !(pat[0] == '*' && patlen == 1);
 
             i += 2;
         } else {
@@ -681,10 +693,11 @@ void scanGenericCommand(redisClient *c, robj *o) {
         } while (cursor && listLength(keys) < count);
     } else if (o->type == REDIS_SET) {
         int pos = 0;
-        long long ll;
+        int64_t ll;
 
         while(intsetGet(o->ptr,pos++,&ll))
             listAddNodeTail(keys,createStringObjectFromLongLong(ll));
+        cursor = 0;
     } else if (o->type == REDIS_HASH || o->type == REDIS_ZSET) {
         unsigned char *p = ziplistIndex(o->ptr,0);
         unsigned char *vstr;
@@ -698,6 +711,7 @@ void scanGenericCommand(redisClient *c, robj *o) {
                                  createStringObjectFromLongLong(vll));
             p = ziplistNext(o->ptr,p);
         }
+        cursor = 0;
     } else {
         redisPanic("Not handled encoding in SCAN.");
     }
@@ -707,22 +721,40 @@ void scanGenericCommand(redisClient *c, robj *o) {
     while (node) {
         robj *kobj = listNodeValue(node);
         nextnode = listNextNode(node);
+        int filter = 0;
 
-        /* Keep key iff pattern matches and, if we are iterating the key
-         * space, check that the key hasn't expired. */
-        if ((patnoop ||
-             stringmatchlen(pat, patlen, kobj->ptr, sdslen(kobj->ptr), 0)) &&
-            (o != NULL || expireIfNeeded(c->db, kobj) == 0))
-        {
-            /* Keep */
-        } else {
+        /* Filter element if it does not match the pattern. */
+        if (!filter && use_pattern) {
+            if (sdsEncodedObject(kobj)) {
+                if (!stringmatchlen(pat, patlen, kobj->ptr, sdslen(kobj->ptr), 0))
+                    filter = 1;
+            } else {
+                char buf[REDIS_LONGSTR_SIZE];
+                int len;
+
+                redisAssert(kobj->encoding == REDIS_ENCODING_INT);
+                len = ll2string(buf,sizeof(buf),(long)kobj->ptr);
+                if (!stringmatchlen(pat, patlen, buf, len, 0)) filter = 1;
+            }
+        }
+
+        /* Filter element if it is an expired key. */
+        if (!filter && o == NULL && expireIfNeeded(c->db, kobj)) filter = 1;
+
+        /* Remove the element and its associted value if needed. */
+        if (filter) {
             decrRefCount(kobj);
             listDelNode(keys, node);
-            /* Also remove the value for hashes and sorted sets. */
-            if (o && (o->type == REDIS_ZSET || o->type == REDIS_HASH)) {
-                node = nextnode;
+        }
+
+        /* If this is an hash or a sorted set, we have a flat list of
+         * key-value elements, so if this element was filtered, remove the
+         * value, or skip it if it was not filtered: we only match keys. */
+        if (o && (o->type == REDIS_ZSET || o->type == REDIS_HASH)) {
+            node = nextnode;
+            nextnode = listNextNode(node);
+            if (filter) {
                 kobj = listNodeValue(node);
-                nextnode = listNextNode(node);
                 decrRefCount(kobj);
                 listDelNode(keys, node);
             }
@@ -751,7 +783,9 @@ cleanup:
 
 /* The SCAN command completely relies on scanGenericCommand. */
 void scanCommand(redisClient *c) {
-    scanGenericCommand(c,NULL);
+    unsigned long cursor;
+    if (parseScanCursorOrReply(c,c->argv[1],&cursor) == REDIS_ERR) return;
+    scanGenericCommand(c,NULL,cursor);
 }
 
 void dbsizeCommand(redisClient *c) {

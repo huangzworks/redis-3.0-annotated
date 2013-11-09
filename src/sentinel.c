@@ -491,6 +491,7 @@ sentinelRedisInstance *sentinelSelectSlave(sentinelRedisInstance *master);
 void sentinelScheduleScriptExecution(char *path, ...);
 void sentinelStartFailover(sentinelRedisInstance *master, int state);
 void sentinelDiscardReplyCallback(redisAsyncContext *c, void *reply, void *privdata);
+int sentinelSendSlaveOf(sentinelRedisInstance *ri, char *host, int port);
 
 /* ========================= Dictionary types =============================== */
 
@@ -1822,9 +1823,10 @@ void sentinelSendAuthIfNeeded(sentinelRedisInstance *ri, redisAsyncContext *c) {
                                                  ri->master->auth_pass;
 
     // 发送 AUTH 命令
-    if (auth_pass)
-        redisAsyncCommand(c, sentinelDiscardReplyCallback, NULL, "AUTH %s",
-            auth_pass);
+    if (auth_pass) {
+        if (redisAsyncCommand(c, sentinelDiscardReplyCallback, NULL, "AUTH %s",
+            auth_pass) == REDIS_OK) ri->pending_commands++;
+    }
 }
 
 /* Create the async connections for the specified instance if the instance
@@ -2123,8 +2125,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
                 int retval;
 
                 // 发送 SLAVEOF 命令，让它成为从服务器，并复制新主服务器
-                retval = redisAsyncCommand(ri->cc,
-                    sentinelDiscardReplyCallback, NULL, "SLAVEOF %s %d",
+                retval = sentinelSendSlaveOf(ri,
                         ri->master->addr->ip,
                         ri->master->addr->port);
                 
@@ -2337,8 +2338,10 @@ void sentinelPingReplyCallback(redisAsyncContext *c, void *reply, void *privdata
                 (ri->flags & SRI_S_DOWN) &&
                 !(ri->flags & SRI_SCRIPT_KILL_SENT))
             {
-                redisAsyncCommand(ri->cc,
-                    sentinelDiscardReplyCallback, NULL, "SCRIPT KILL");
+                if (redisAsyncCommand(ri->cc,
+                        sentinelDiscardReplyCallback, NULL,
+                        "SCRIPT KILL") == REDIS_OK)
+                    ri->pending_commands++;
                 ri->flags |= SRI_SCRIPT_KILL_SENT;
             }
         }
@@ -3335,6 +3338,40 @@ char *sentinelGetObjectiveLeader(sentinelRedisInstance *master) {
     return winner;
 }
 
+/* Send SLAVEOF to the specified instance, always followed by a
+ * CONFIG REWRITE command in order to store the new configuration on disk
+ * when possible (that is, if the Redis instance is recent enough to support
+ * config rewriting, and if the server was started with a configuration file).
+ *
+ * If Host is NULL the function sends "SLAVEOF NO ONE".
+ *
+ * The command returns REDIS_OK if the SLAVEOF command was accepted for
+ * (later) delivery otherwise REDIS_ERR. The command replies are just
+ * discarded. */
+int sentinelSendSlaveOf(sentinelRedisInstance *ri, char *host, int port) {
+    char portstr[32];
+    int retval;
+
+    ll2string(portstr,sizeof(portstr),port);
+
+    if (host == NULL) {
+        host = "NO";
+        memcpy(portstr,"ONE",4);
+    }
+
+    retval = redisAsyncCommand(ri->cc,
+        sentinelDiscardReplyCallback, NULL, "SLAVEOF %s %s", host, portstr);
+    if (retval == REDIS_ERR) return retval;
+
+    ri->pending_commands++;
+    if (redisAsyncCommand(ri->cc,
+        sentinelDiscardReplyCallback, NULL, "CONFIG REWRITE") == REDIS_OK)
+    {
+        ri->pending_commands++;
+    }
+    return REDIS_OK;
+}
+
 /* Setup the master state to start a failover as a leader.
  *
  * 设置 master 的状态，开始一次故障转移
@@ -3693,19 +3730,9 @@ void sentinelFailoverSendSlaveOfNoOne(sentinelRedisInstance *ri) {
      *
      * We actually register a generic callback for this command as we don't
      * really care about the reply. We check if it worked indirectly observing
-     * if INFO returns a different role (master instead of slave). 
-     *
-     * 这里只发送命令，但并不考虑命令是否执行成功，
-     * 因为其他代码会通过检查 INFO 命令的返回值来查看升级是否成功
-     * 也即是，服务器的 role 是否从 slave 改为 master 了
-     */
-    retval = redisAsyncCommand(ri->promoted_slave->cc,
-        sentinelDiscardReplyCallback, NULL, "SLAVEOF NO ONE");
+     * if INFO returns a different role (master instead of slave). */
+    retval = sentinelSendSlaveOf(ri->promoted_slave,NULL,0);
     if (retval != REDIS_OK) return;
-
-    ri->promoted_slave->pending_commands++;
-
-    // 发送事件
     sentinelEvent(REDIS_NOTICE, "+failover-state-wait-promotion",
         ri->promoted_slave,"%@");
 
@@ -3814,10 +3841,6 @@ void sentinelFailoverDetectEnd(sentinelRedisInstance *master) {
     if (timeout && (master->flags & SRI_I_AM_THE_LEADER)) {
         dictIterator *di;
         dictEntry *de;
-        char master_port[32];
-
-        ll2string(master_port,sizeof(master_port),
-            master->promoted_slave->addr->port);
 
         // 遍历所有从服务器
         di = dictGetIterator(master->slaves);
@@ -3830,12 +3853,9 @@ void sentinelFailoverDetectEnd(sentinelRedisInstance *master) {
                 (SRI_RECONF_DONE|SRI_RECONF_SENT|SRI_DISCONNECTED)) continue;
 
             // 发送命令
-            retval = redisAsyncCommand(slave->cc,
-                sentinelDiscardReplyCallback, NULL, "SLAVEOF %s %s",
+            retval = sentinelSendSlaveOf(slave,
                     master->promoted_slave->addr->ip,
-                    master_port);
-            
-            // 发送事件
+                    master->promoted_slave->addr->port);
             if (retval == REDIS_OK) {
                 sentinelEvent(REDIS_NOTICE,"+slave-reconf-sent-be",slave,"%@");
                 // 打开从服务器的 SLAVEOF 命令已发送标记
@@ -3873,7 +3893,6 @@ void sentinelFailoverReconfNextSlave(sentinelRedisInstance *master) {
     {
         sentinelRedisInstance *slave = dictGetVal(de);
         int retval;
-        char master_port[32];
 
         /* Skip the promoted slave, and already configured slaves. */
         // 跳过新主服务器，以及已经完成了同步的从服务器
@@ -3902,18 +3921,13 @@ void sentinelFailoverReconfNextSlave(sentinelRedisInstance *master) {
 
         /* Send SLAVEOF <new master>. */
         // 向从服务器发送 SLAVEOF 命令，让它同步新主服务器
-        ll2string(master_port,sizeof(master_port),
-            master->promoted_slave->addr->port);
-        retval = redisAsyncCommand(slave->cc,
-            sentinelDiscardReplyCallback, NULL, "SLAVEOF %s %s",
+        retval = sentinelSendSlaveOf(slave,
                 master->promoted_slave->addr->ip,
-                master_port);
-
+                master->promoted_slave->addr->port);
         if (retval == REDIS_OK) {
 
             // 将状态改为 SLAVEOF 命令已发送
             slave->flags |= SRI_RECONF_SENT;
-            slave->pending_commands++;
             // 更新发送 SLAVEOF 命令的时间
             slave->slave_reconf_sent_time = mstime();
             sentinelEvent(REDIS_NOTICE,"+slave-reconf-sent",slave,"%@");
@@ -4044,13 +4058,11 @@ void sentinelFailoverStateMachine(sentinelRedisInstance *ri) {
  *    那么向它发送一个 SLAVEOF 命令，让它重新变成从服务器，并复制原主服务器
  */
 void sentinelAbortFailover(sentinelRedisInstance *ri) {
-    char master_port[32];
     dictIterator *di;
     dictEntry *de;
     int sentinel_role;
 
     redisAssert(ri->flags & SRI_FAILOVER_IN_PROGRESS);
-    ll2string(master_port,sizeof(master_port),ri->addr->port);
 
     /* Clear failover related flags from slaves.
      * Also if we are the leader make sure to send SLAVEOF commands to all the
@@ -4071,10 +4083,7 @@ void sentinelAbortFailover(sentinelRedisInstance *ri) {
             int retval;
 
             // 发送 SLAVEOF 命令，让它重新开始复制旧主服务器
-            retval = redisAsyncCommand(slave->cc,
-                sentinelDiscardReplyCallback, NULL, "SLAVEOF %s %s",
-                    ri->addr->ip,
-                    master_port);
+            retval = sentinelSendSlaveOf(slave,ri->addr->ip,ri->addr->port);
             if (retval == REDIS_OK)
                 sentinelEvent(REDIS_NOTICE,"-slave-reconf-undo",slave,"%@");
         }
