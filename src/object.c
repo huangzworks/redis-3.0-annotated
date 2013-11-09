@@ -52,6 +52,8 @@ robj *createObject(int type, void *ptr) {
 
 /* Create a string object with encoding REDIS_ENCODING_RAW, that is a plain
  * string object where o->ptr points to a proper sds string. */
+// 创建一个 REDIS_ENCODING_RAW 编码的字符对象
+// 对象的指针指向一个 sds 结构
 robj *createRawStringObject(char *ptr, size_t len) {
     return createObject(REDIS_STRING,sdsnewlen(ptr,len));
 }
@@ -59,6 +61,9 @@ robj *createRawStringObject(char *ptr, size_t len) {
 /* Create a string object with encoding REDIS_ENCODING_EMBSTR, that is
  * an object where the sds string is actually an unmodifiable string
  * allocated in the same chunk as the object itself. */
+// 创建一个 REDIS_ENCODING_EMBSTR 编码的字符对象
+// 这个字符串对象中的 sds 会和字符串对象的 redisObject 结构一起分配
+// 因此这个字符也是不可修改的
 robj *createEmbeddedStringObject(char *ptr, size_t len) {
     robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr)+len+1);
     struct sdshdr *sh = (void*)(o+1);
@@ -83,6 +88,9 @@ robj *createEmbeddedStringObject(char *ptr, size_t len) {
 /* Create a string object with EMBSTR encoding if it is smaller than
  * REIDS_ENCODING_EMBSTR_SIZE_LIMIT, otherwise the RAW encoding is
  * used. */
+// 如果输入字符串的长度小于 REDIS_ENCODING_EMBSTR_SIZE_LIMIT
+// 那么创建一个 EMBSTR 编码的字符对象
+// 否则创建一个 RAW 编码的字符对象
 #define REDIS_ENCODING_EMBSTR_SIZE_LIMIT 32
 robj *createStringObject(char *ptr, size_t len) {
     if (len <= REDIS_ENCODING_EMBSTR_SIZE_LIMIT)
@@ -166,26 +174,38 @@ robj *createStringObjectFromLongDouble(long double value) {
 /* Duplicate a string object, with the guarantee that the returned object
  * has the same encoding as the original one.
  *
+ * 复制一个字符串对象，复制出的对象和输入对象拥有相同编码。
+ *
  * This function also guarantees that duplicating a small integere object
  * (or a string object that contains a representation of a small integer)
  * will always result in a fresh object that is unshared (refcount == 1).
  *
- * The resulting object always has refcount set to 1. */
+ * 另外，
+ * 这个函数在复制一个包含整数值的字符串对象时，总是产生一个非共享的对象。
+ *
+ * The resulting object always has refcount set to 1. 
+ *
+ * 输出对象的 refcount 总为 1 。
+ */
 robj *dupStringObject(robj *o) {
     robj *d;
 
     redisAssert(o->type == REDIS_STRING);
 
     switch(o->encoding) {
+
     case REDIS_ENCODING_RAW:
         return createRawStringObject(o->ptr,sdslen(o->ptr));
+
     case REDIS_ENCODING_EMBSTR:
         return createEmbeddedStringObject(o->ptr,sdslen(o->ptr));
+
     case REDIS_ENCODING_INT:
         d = createObject(REDIS_STRING, NULL);
         d->encoding = REDIS_ENCODING_INT;
         d->ptr = o->ptr;
         return d;
+
     default:
         redisPanic("Wrong encoding.");
         break;

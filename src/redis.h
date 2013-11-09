@@ -697,12 +697,13 @@ typedef struct zskiplist {
  */
 typedef struct zset {
 
-    // 字典，将元素映射到分值
-    // 用于支持 O(1) 的按成员取分值操作
+    // 字典，键为成员，值为分值
+    // 用于支持 O(1) 复杂度的按成员取分值操作
     dict *dict;
 
-    // 跳跃表，按分值排序元素
-    // 用于支持 T_avg = O(log N) 的按分值定位成员操作
+    // 跳跃表，按分值排序成员
+    // 用于支持平均复杂度为 O(log N) 的按分值定位成员操作
+    // 以及范围操作
     zskiplist *zsl;
 
 } zset;
