@@ -998,12 +998,16 @@ void freeClientAsync(redisClient *c) {
 
 // 关闭需要异步关闭的客户端
 void freeClientsInAsyncFreeQueue(void) {
+    
+    // 遍历所有要关闭的客户端
     while (listLength(server.clients_to_close)) {
         listNode *ln = listFirst(server.clients_to_close);
         redisClient *c = listNodeValue(ln);
 
         c->flags &= ~REDIS_CLOSE_ASAP;
+        // 关闭客户端
         freeClient(c);
+        // 从客户端链表中删除被关闭的客户端
         listDelNode(server.clients_to_close,ln);
     }
 }

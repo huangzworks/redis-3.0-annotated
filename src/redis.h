@@ -391,7 +391,7 @@ typedef struct redisObject {
     // 编码
     unsigned encoding:4;
 
-    // LRU 时间
+    // 对象最后一次被访问的时间
     unsigned lru:22;        /* lru time (relative to server.lruclock) */
 
     // 引用计数
