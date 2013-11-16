@@ -1023,7 +1023,7 @@ void trackOperationsPerSecond(void) {
 
     long long ops_sec;
 
-    // 计算服务器每秒执行的命令数量
+    // 计算距离上一次抽样之后，每秒执行命令的数量
     ops_sec = t > 0 ? (ops*1000/t) : 0;
 
     // 将计算出的执行命令数量保存到抽样数组
@@ -1037,12 +1037,16 @@ void trackOperationsPerSecond(void) {
 }
 
 /* Return the mean of all the samples. */
+// 根据所有取样信息，计算服务器最近一秒执行命令数的平均值
 long long getOperationsPerSecond(void) {
     int j;
     long long sum = 0;
 
+    // 计算所有取样值的总和
     for (j = 0; j < REDIS_OPS_SEC_SAMPLES; j++)
         sum += server.ops_sec_samples[j];
+
+    // 计算取样的平均值
     return sum / REDIS_OPS_SEC_SAMPLES;
 }
 
@@ -1292,7 +1296,9 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * in objects at every object access, and accuracy is not needed.
      * To access a global var is faster than calling time(NULL) */
     // 缓存起系统时间，减少执行系统调用的次数
+    // 秒格式的 UNIX 时间
     server.unixtime = time(NULL);
+    // 毫秒格式的时间
     server.mstime = mstime();
 
     // 记录服务器执行命令的次数

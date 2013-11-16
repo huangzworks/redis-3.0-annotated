@@ -776,7 +776,7 @@ struct redisServer {
     // 数据库
     redisDb *db;
 
-    // 命令表（收到 rename 配置选项的作用）
+    // 命令表（受到 rename 配置选项的作用）
     dict *commands;             /* Command table */
     // 命令表（无 rename 配置选项的作用）
     dict *orig_commands;        /* Command table before command renaming. */
@@ -918,6 +918,9 @@ struct redisServer {
     // PSYNC 执行失败的次数
     long long stat_sync_partial_err;/* Number of unaccepted PSYNC requests. */
 
+
+    /* slowlog */
+
     // 保存了所有慢查询日志的链表
     list *slowlog;                  /* SLOWLOG list of commands */
 
@@ -930,11 +933,16 @@ struct redisServer {
     // 服务器配置 slowlog-max-len 选项的值
     unsigned long slowlog_max_len;     /* SLOWLOG max number of items logged */
 
+
     /* The following two are used to track instantaneous "load" in terms
      * of operations per second. */
+    // 最后一次进行抽样的时间
     long long ops_sec_last_sample_time; /* Timestamp of last sample (in ms) */
+    // 最后一次抽样时，服务器已执行命令的数量
     long long ops_sec_last_sample_ops;  /* numcommands in last sample */
+    // 抽样结果
     long long ops_sec_samples[REDIS_OPS_SEC_SAMPLES];
+    // 数组索引，用于保存抽样结果，并在需要时回绕到 0
     int ops_sec_idx;
 
 
@@ -1010,6 +1018,8 @@ struct redisServer {
 
     // 指示是否需要每写入一定量的数据，就主动执行一次 fsync()
     int aof_rewrite_incremental_fsync;/* fsync incrementally while rewriting? */
+
+
     /* RDB persistence */
 
     // 自从上次 SAVE 执行以来，数据库被修改的次数
@@ -1042,13 +1052,19 @@ struct redisServer {
     // 最后一次执行 SAVE 的状态
     int lastbgsave_status;          /* REDIS_OK or REDIS_ERR */
     int stop_writes_on_bgsave_err;  /* Don't allow writes if can't BGSAVE */
+
+
     /* Propagation of commands in AOF / replication */
     redisOpArray also_propagate;    /* Additional command to propagate. */
+
+
     /* Logging */
     char *logfile;                  /* Path of log file */
     int syslog_enabled;             /* Is syslog enabled? */
     char *syslog_ident;             /* Syslog ident */
     int syslog_facility;            /* Syslog facility */
+
+
     /* Replication (master) */
     int slaveseldb;                 /* Last SELECTed DB in replication output */
     // 全局复制偏移量（一个累计值）
@@ -1081,6 +1097,7 @@ struct redisServer {
     int repl_min_slaves_max_lag;    /* Max lag of <count> slaves to write. */
     // 延迟良好的从服务器的数量
     int repl_good_slaves_count;     /* Number of slaves with lag <= max_lag. */
+
 
     /* Replication (slave) */
     // 主服务器的验证密码
@@ -1126,6 +1143,8 @@ struct redisServer {
     char repl_master_runid[REDIS_RUN_ID_SIZE+1];  /* Master run id for PSYNC. */
     // 初始化偏移量
     long long repl_master_initial_offset;         /* Master PSYNC offset. */
+
+
     /* Replication script cache. */
     // 复制脚本缓存
     // 字典
@@ -1134,21 +1153,29 @@ struct redisServer {
     list *repl_scriptcache_fifo;        /* First in, first out LRU eviction. */
     // 缓存的大小
     int repl_scriptcache_size;          /* Max number of elements. */
+
+
     /* Limits */
     unsigned int maxclients;        /* Max number of simultaneous clients */
     unsigned long long maxmemory;   /* Max number of memory bytes to use */
     int maxmemory_policy;           /* Policy for key eviction */
     int maxmemory_samples;          /* Pricision of random sampling */
+
+
     /* Blocked clients */
     unsigned int bpop_blocked_clients; /* Number of clients blocked by lists */
     list *unblocked_clients; /* list of clients to unblock before next loop */
     list *ready_keys;        /* List of readyList structures for BLPOP & co */
+
+
     /* Sort parameters - qsort_r() is only available under BSD so we
      * have to take this state global, in order to pass it to sortCompare() */
     int sort_desc;
     int sort_alpha;
     int sort_bypattern;
     int sort_store;
+
+
     /* Zip structure config, see redis.conf for more information  */
     size_t hash_max_ziplist_entries;
     size_t hash_max_ziplist_value;
@@ -1160,6 +1187,7 @@ struct redisServer {
 
     time_t unixtime;        /* Unix time sampled every cron cycle. */
     long long mstime;       /* Like 'unixtime' but with milliseconds resolution. */
+
 
     /* Pubsub */
     // 字典，键为频道，值为链表
@@ -1180,6 +1208,7 @@ struct redisServer {
     mstime_t cluster_node_timeout; /* Cluster node timeout. */
     char *cluster_configfile; /* Cluster auto-generated config file name. */
     struct clusterState *cluster;  /* State of the cluster */
+
 
     /* Scripting */
 
