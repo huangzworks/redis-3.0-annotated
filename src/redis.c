@@ -3746,6 +3746,8 @@ int main(int argc, char **argv) {
         // 打印本地套接字端口
         if (server.sofd > 0)
             redisLog(REDIS_NOTICE,"The server is now ready to accept connections at %s", server.unixsocket);
+    } else {
+        sentinelIsRunning();
     }
 
     /* Warning the user about suspicious maxmemory setting. */
