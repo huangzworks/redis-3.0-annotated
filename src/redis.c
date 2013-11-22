@@ -1660,11 +1660,18 @@ void initServerConfig() {
     int j;
 
     // 服务器状态
+
+    // 设置服务器的运行 ID
     getRandomHexChars(server.runid,REDIS_RUN_ID_SIZE);
+    // 设置默认配置文件路径
     server.configfile = NULL;
+    // 设置默认服务器频率
     server.hz = REDIS_DEFAULT_HZ;
+    // 为运行 ID 加上结尾字符
     server.runid[REDIS_RUN_ID_SIZE] = '\0';
+    // 设置服务器的运行架构
     server.arch_bits = (sizeof(long) == 8) ? 64 : 32;
+    // 设置默认服务器端口号
     server.port = REDIS_SERVERPORT;
     server.bindaddr_count = 0;
     server.unixsocket = NULL;
@@ -2487,7 +2494,9 @@ int processCommand(redisClient *c) {
     }
 
     /* Don't accept write commands if there are problems persisting on disk. */
-    // 如果前面有 BGSAVE 发生了错误，那么拒绝执行写命令
+    // 如果前面有 BGSAVE 发生了错误
+    // 并且 stop-writes-on-bgsave-error 选项已打开
+    // 那么拒绝执行写命令
     if (server.stop_writes_on_bgsave_err &&
         server.saveparamslen > 0
         && server.lastbgsave_status == REDIS_ERR &&
@@ -2500,6 +2509,9 @@ int processCommand(redisClient *c) {
 
     /* Don't accept write commands if there are not enough good slaves and
      * used configured the min-slaves-to-write option. */
+    // 如果服务器没有足够多的状态良好服务器
+    // 并且 min-slaves-to-write 选项已打开
+    // 那么拒绝执行写命令
     if (server.repl_min_slaves_to_write &&
         server.repl_min_slaves_max_lag &&
         c->cmd->flags & REDIS_CMD_WRITE &&
