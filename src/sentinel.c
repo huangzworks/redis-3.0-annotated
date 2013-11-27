@@ -2253,11 +2253,10 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
     }
 
     /* Clear the DISCONNECTED flags only if we have both the connections
-     * (or just the commands connection if this is a slave or a
-     * sentinel instance). */
+     * (or just the commands connection if this is a sentinel instance). */
     // 如果实例是主服务器或者从服务器，那么当 cc 和 pc 两个连接都创建成功时，关闭 DISCONNECTED 标识
     // 如果实例是 Sentinel ，那么当 cc 连接创建成功时，关闭 DISCONNECTED 标识
-    if (ri->cc && (ri->flags & (SRI_SLAVE|SRI_SENTINEL) || ri->pc))
+    if (ri->cc && (ri->flags & SRI_SENTINEL || ri->pc))
         ri->flags &= ~SRI_DISCONNECTED;
 }
 
