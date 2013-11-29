@@ -335,6 +335,8 @@ typedef struct sentinelRedisInstance {
 
     // 最后一次进行故障迁移的时间
     mstime_t failover_start_time;   /* Last failover attempt start time. */
+
+    // SENTINEL failover-timeout <master-name> <ms> 选项的值
     // 刷新故障迁移状态的最大时限
     mstime_t failover_timeout;      /* Max time to refresh failover state. */
 
@@ -640,6 +642,7 @@ void initSentinel(void) {
     /* 初始化 Sentinel 的状态 */
     // 初始化纪元
     sentinel.current_epoch = 0;
+
     // 初始化保存主服务器信息的字典
     sentinel.masters = dictCreate(&instancesDictType,NULL);
 
@@ -2375,6 +2378,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
 
         /* master_link_down_since_seconds:<seconds> */
         // 读取主从服务器的断线时长
+        // 这个只会在实例是从服务器，并且主从连接断开的情况下出现
         if (sdslen(l) >= 32 &&
             !memcmp(l,"master_link_down_since_seconds",30))
         {
@@ -2692,7 +2696,7 @@ void sentinelPublishReplyCallback(redisAsyncContext *c, void *reply, void *privd
 
 /* This is our Pub/Sub callback for the Hello channel. It's useful in order
  * to discover other sentinels attached at the same master. */
-// 此回调函数用于处理 Hello 频道的返回值，它可以发现其他正在订阅统一主服务器的 sentinel
+// 此回调函数用于处理 Hello 频道的返回值，它可以发现其他正在订阅同一主服务器的 Sentinel
 void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privdata) {
     sentinelRedisInstance *ri = c->data, *master;
     redisReply *r;
@@ -2700,6 +2704,8 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
     if (!reply || !ri) return;
     r = reply;
 
+    // 如果实例是主服务器，那么指向实例
+    // 如果实例是从服务器，那么指向实例的主服务器
     master = (ri->flags & SRI_MASTER) ? ri : ri->master;
 
     /* Update the last activity in the pubsub channel. Note that since we
@@ -2745,10 +2751,13 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
             master_config_epoch = strtoull(token[7],NULL,10);
             sentinelRedisInstance *msgmaster;
 
+            // 检查 Sentinel 是否存在
             if (!si) {
                 /* If not, remove all the sentinels that have the same runid
                  * OR the same ip/port, because it's either a restart or a
                  * network topology change. */
+                // 不存在，移除所有和 Sentinel 有相同运行 ID 或者相同地址（IP和端口）
+                // 的已存在 Sentinel ，因为这些已存在 Sentinel 有可能是重启之前的 Sentinel
                 removed = removeMatchingSentinelsFromMaster(master,token[0],port,
                                 token[2]);
                 // 发送移除 sentinel 实例事件
@@ -2759,6 +2768,7 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
                 }
 
                 /* Add the new sentinel. */
+                // 添加新 Sentinel
                 si = createSentinelRedisInstance(NULL,SRI_SENTINEL,
                                 token[0],port,master->quorum,master);
                 if (si) {
@@ -2772,6 +2782,7 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
             }
 
             /* Update local current_epoch if received current_epoch is greater.*/
+            // 如果从对方 Sentinel 接收到更高的纪元，那么更新本 Sentinel 的纪元
             if (current_epoch > sentinel.current_epoch) {
                 sentinel.current_epoch = current_epoch;
                 sentinelEvent(REDIS_WARNING,"+new-epoch",ri,"%llu",
@@ -2779,9 +2790,14 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
             }
 
             /* Update master info if received configuration is newer. */
+            // 查找指定的主服务器
             if ((msgmaster = sentinelGetMasterByName(token[4])) != NULL) {
+
+                // 如果 Sentinel 保存的信息中的主服务器的纪元未更新，那么进行更新
                 if (msgmaster->config_epoch < master_config_epoch) {
                     msgmaster->config_epoch = master_config_epoch;
+
+                    // 如果 Sentinel 的地址已经修改，那么更新实例结构中的地址
                     if (master_port != msgmaster->addr->port ||
                         strcmp(msgmaster->addr->ip, token[5]))
                     {
