@@ -96,10 +96,10 @@ typedef struct aeFileEvent {
     // 或者 AE_READABLE | AE_WRITABLE
     int mask; /* one of AE_(READABLE|WRITABLE) */
 
-    // 写事件处理器
+    // 读事件处理器
     aeFileProc *rfileProc;
 
-    // 读事件处理器
+    // 写事件处理器
     aeFileProc *wfileProc;
 
     // 多路复用库的私有数据
