@@ -2512,7 +2512,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
                 "start",ri->master->addr,ri->addr);
 
         // 这个实例由从服务器变为了主服务器，并且没有进入 TILT 模式
-        // （可能是因为重启造成的）
+        // （可能是因为重启造成的，或者之前的下线主服务器重新上线了）
         } else if (!sentinel.tilt) {
             /* A slave turned into a master. We want to force our view and
              * reconfigure as slave. Wait some time after the change before
@@ -2534,7 +2534,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
                         ri->master->addr->ip,
                         ri->master->addr->port);
                 
-                // 发送 demote 事件
+                // 发送事件
                 if (retval == REDIS_OK)
                     sentinelEvent(REDIS_NOTICE,"+convert-to-slave",ri,"%@");
             }
@@ -3240,6 +3240,10 @@ void sentinelCommand(redisClient *c) {
 
         /* Reply with a three-elements multi-bulk reply:
          * down state, leader, vote epoch. */
+        // 多条回复
+        // 1) <down_state>    1 代表下线， 0 代表未下线
+        // 2) <leader_runid>  Sentinel 选举作为领头 Sentinel 的运行 ID
+        // 3) <leader_epoch>  领头 Sentinel 目前的配置纪元
         addReplyMultiBulkLen(c,3);
         addReply(c, isdown ? shared.cone : shared.czero);
         addReplyBulkCString(c, leader ? leader : "*");
@@ -3554,6 +3558,7 @@ void sentinelReceiveIsMasterDownReply(redisAsyncContext *c, void *reply, void *p
             /* If the runid in the reply is not "*" the Sentinel actually
              * replied with a vote. */
             sdsfree(ri->leader);
+            // 设置实例的领头
             ri->leader = sdsnew(r->element[1]->str);
             ri->leader_epoch = r->element[2]->integer;
         }
@@ -3618,6 +3623,9 @@ void sentinelAskMasterStateToOtherSentinels(sentinelRedisInstance *master, int f
                     "SENTINEL is-master-down-by-addr %s %s %llu %s",
                     master->addr->ip, port,
                     sentinel.current_epoch,
+                    // 如果本 Sentinel 已经检测到 master 进入 ODOWN 
+                    // 并且要开始一次故障转移，那么向其他 Sentinel 发送自己的运行 ID
+                    // 让对方将给自己投一票（如果对方在这个纪元内还没有投票的话）
                     (master->failover_state > SENTINEL_FAILOVER_STATE_NONE) ?
                     server.runid : "*");
         if (retval == REDIS_OK) ri->pending_commands++;
