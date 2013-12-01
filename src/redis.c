@@ -2493,14 +2493,16 @@ int processCommand(redisClient *c) {
         }
     }
 
-    /* Don't accept write commands if there are problems persisting on disk. */
-    // 如果前面有 BGSAVE 发生了错误
-    // 并且 stop-writes-on-bgsave-error 选项已打开
-    // 那么拒绝执行写命令
+    /* Don't accept write commands if there are problems persisting on disk
+     * and if this is a master instance. */
+    // 如果这是一个主服务器，并且这个服务器之前执行 BGSAVE 时发生了错误
+    // 那么不执行写命令
     if (server.stop_writes_on_bgsave_err &&
         server.saveparamslen > 0
         && server.lastbgsave_status == REDIS_ERR &&
-        c->cmd->flags & REDIS_CMD_WRITE)
+        server.masterhost != NULL &&
+        (c->cmd->flags & REDIS_CMD_WRITE ||
+         c->cmd->proc == pingCommand))
     {
         flagTransaction(c);
         addReply(c, shared.bgsaveerr);
@@ -2508,10 +2510,9 @@ int processCommand(redisClient *c) {
     }
 
     /* Don't accept write commands if there are not enough good slaves and
-     * used configured the min-slaves-to-write option. */
+     * user configured the min-slaves-to-write option. */
     // 如果服务器没有足够多的状态良好服务器
     // 并且 min-slaves-to-write 选项已打开
-    // 那么拒绝执行写命令
     if (server.repl_min_slaves_to_write &&
         server.repl_min_slaves_max_lag &&
         c->cmd->flags & REDIS_CMD_WRITE &&
