@@ -151,18 +151,19 @@ redisClient *createClient(int fd) {
     // 回复链表的释放和复制函数
     listSetFreeMethod(c->reply,decrRefCountVoid);
     listSetDupMethod(c->reply,dupClientReplyValue);
-    // 造成客户端阻塞的列表键
-    c->bpop.keys = dictCreate(&setDictType,NULL);
+    c->btype = REDIS_BLOCKED_NONE;
     // 阻塞超时
     c->bpop.timeout = 0;
+    // 造成客户端阻塞的列表键
+    c->bpop.keys = dictCreate(&setDictType,NULL);
     // 在解除阻塞时将元素推入到 target 指定的键中
     // BRPOPLPUSH 命令时使用
     c->bpop.target = NULL;
-    // 需要从 SWAP 中取出的键，似乎是遗留代码
-    c->io_keys = listCreate();
+    c->bpop.numreplicas = 0;
+    c->bpop.reploffset = 0;
+    c->woff = 0;
     // 进行事务时监视的键
     c->watched_keys = listCreate();
-    listSetFreeMethod(c->io_keys,decrRefCountVoid);
     // 订阅的频道和模式
     c->pubsub_channels = dictCreate(&setDictType,NULL);
     c->pubsub_patterns = listCreate();
@@ -887,18 +888,12 @@ void freeClient(redisClient *c) {
         return;
     }
 
-    /* Note that if the client we are freeing is blocked into a blocking
-     * call, we have to set querybuf to NULL *before* to call
-     * unblockClientWaitingData() to avoid processInputBuffer() will get
-     * called. Also it is important to remove the file events after
-     * this, because this call adds the READABLE event. */
-    // 清空查询缓冲区
+    /* Free the query buffer */
     sdsfree(c->querybuf);
     c->querybuf = NULL;
 
-    // 清空阻塞信息
-    if (c->flags & REDIS_BLOCKED)
-        unblockClientWaitingData(c);
+    /* Deallocate structures used to block on blocking ops. */
+    if (c->flags & REDIS_BLOCKED) unblockClient(c);
     dictRelease(c->bpop.keys);
 
     /* UNWATCH all the keys */
@@ -937,16 +932,16 @@ void freeClient(redisClient *c) {
     }
 
     /* When client was just unblocked because of a blocking operation,
-     * remove it from the list with unblocked clients. */
+     * remove it from the list of unblocked clients. */
     // 删除客户端的阻塞信息
     if (c->flags & REDIS_UNBLOCKED) {
         ln = listSearchKey(server.unblocked_clients,c);
         redisAssert(ln != NULL);
         listDelNode(server.unblocked_clients,ln);
     }
-    listRelease(c->io_keys);
-    /* Master/slave cleanup.
-     * Case 1: we lost the connection with a slave. */
+
+    /* Master/slave cleanup Case 1:
+     * we lost the connection with a slave. */
     if (c->flags & REDIS_SLAVE) {
         if (c->replstate == REDIS_REPL_SEND_BULK) {
             if (c->repldbfd != -1) close(c->repldbfd);
@@ -964,7 +959,8 @@ void freeClient(redisClient *c) {
         refreshGoodSlavesCount();
     }
 
-    /* Case 2: we lost the connection with the master. */
+    /* Master/slave cleanup Case 2:
+     * we lost the connection with the master. */
     if (c->flags & REDIS_MASTER) replicationHandleMasterDisconnection();
 
     /* If this client was scheduled for async freeing we need to remove it
@@ -975,8 +971,8 @@ void freeClient(redisClient *c) {
         listDelNode(server.clients_to_close,ln);
     }
 
-    /* Release memory */
-    // 清除名字
+    /* Release other dynamically allocated client structure fields,
+     * and finally release the client structure itself. */
     if (c->name) decrRefCount(c->name);
     // 清除参数空间
     zfree(c->argv);

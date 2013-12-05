@@ -234,6 +234,12 @@
 #define REDIS_FORCE_REPL (1<<15)  /* Force replication of current cmd. */
 #define REDIS_PRE_PSYNC_SLAVE (1<<16) /* Slave don't understand PSYNC. */
 
+/* Client block type (btype field in client structure)
+ * if REDIS_BLOCKED flag is set. */
+#define REDIS_BLOCKED_NONE 0    /* Not blocked, no REDIS_BLOCKED flag set. */
+#define REDIS_BLOCKED_LIST 1    /* BLPOP & co. */
+#define REDIS_BLOCKED_WAIT 2    /* WAIT for synchronous replication. */
+
 /* Client request types */
 #define REDIS_REQ_INLINE 1
 #define REDIS_REQ_MULTIBULK 2
@@ -470,13 +476,22 @@ typedef struct multiState {
     time_t minreplicas_timeout; /* MINREPLICAS timeout as unixtime. */
 } multiState;
 
+/* This structure holds the blocking operation state for a client.
+ * The fields used depend on client->btype. */
 typedef struct blockingState {
+    /* Generic fields. */
+    mstime_t timeout;       /* Blocking operation timeout. If UNIX current time
+                             * is > timeout then the operation timed out. */
+
+    /* REDIS_BLOCK_LIST */
     dict *keys;             /* The keys we are waiting to terminate a blocking
                              * operation such as BLPOP. Otherwise NULL. */
-    time_t timeout;         /* Blocking operation timeout. If UNIX current time
-                             * is > timeout then the operation timed out. */
     robj *target;           /* The key that should receive the element,
                              * for BRPOPLPUSH. */
+
+    /* REDIS_BLOCK_WAIT */
+    int numreplicas;        /* Number of replicas we are waiting for ACK. */
+    long long reploffset;   /* Replication offset to reach. */
 } blockingState;
 
 /* The following structure represents a node in the server.ready_keys list,
@@ -593,13 +608,10 @@ typedef struct redisClient {
     // 事务状态
     multiState mstate;      /* MULTI/EXEC state */
 
+    int btype;              /* Type of blocking op if REDIS_BLOCKED. */
     // 阻塞状态
-    blockingState bpop;   /* blocking state */
-
-    // 等待从 SWAP 中载入的键
-    // （是否 STORAGE 系统的遗留产物？）
-    list *io_keys;          /* Keys this client is waiting to be loaded from the
-                             * swap file in order to continue. */
+    blockingState bpop;     /* blocking state */
+    long long woff;         /* Last write global replication offset. */
 
     // 被监视的键
     list *watched_keys;     /* Keys WATCHED for MULTI/EXEC CAS */
@@ -1154,7 +1166,9 @@ struct redisServer {
     // 缓存的大小
     int repl_scriptcache_size;          /* Max number of elements. */
 
-
+    /* Synchronous replication. */
+    list *clients_waiting_acks;         /* Clients waiting in WAIT command. */
+    int get_ack_from_slaves;            /* If true we send REPLCONF GETACK. */
     /* Limits */
     unsigned int maxclients;        /* Max number of simultaneous clients */
     unsigned long long maxmemory;   /* Max number of memory bytes to use */
@@ -1442,6 +1456,7 @@ extern struct sharedObjectsStruct shared;
 extern dictType setDictType;
 extern dictType zsetDictType;
 extern dictType clusterNodesDictType;
+extern dictType clusterNodesBlackListDictType;
 extern dictType dbDictType;
 extern dictType shaScriptObjectDictType;
 extern double R_Zero, R_PosInf, R_NegInf, R_Nan;
@@ -1606,6 +1621,9 @@ void replicationScriptCacheInit(void);
 void replicationScriptCacheFlush(void);
 void replicationScriptCacheAdd(sds sha1);
 int replicationScriptCacheExists(sds sha1);
+void processClientsWaitingReplicas(void);
+void unblockClientWaitingReplicas(redisClient *c);
+int replicationCountAcksByOffset(long long offset);
 
 /* Generic persistence functions */
 void startLoading(FILE *fp);
@@ -1794,6 +1812,13 @@ void sentinelIsRunning(void);
 /* Scripting */
 void scriptingInit(void);
 
+/* Blocked clients */
+void processUnblockedClients(void);
+void blockClient(redisClient *c, int btype);
+void unblockClient(redisClient *c);
+void replyToBlockedClientTimedOut(redisClient *c);
+int getTimeoutFromObjectOrReply(redisClient *c, robj *object, mstime_t *timeout, int unit);
+
 /* Git SHA1 */
 char *redisGitSHA1(void);
 char *redisGitDirty(void);
@@ -1942,6 +1967,7 @@ void timeCommand(redisClient *c);
 void bitopCommand(redisClient *c);
 void bitcountCommand(redisClient *c);
 void replconfCommand(redisClient *c);
+void waitCommand(redisClient *c);
 
 #if defined(__GNUC__)
 void *calloc(size_t count, size_t size) __attribute__ ((deprecated));

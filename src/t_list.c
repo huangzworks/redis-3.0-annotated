@@ -1128,18 +1128,15 @@ void rpoplpushCommand(redisClient *c) {
  */
 
 /* Set a client in blocking mode for the specified key, with the specified
- * timeout 
- *
- * 根据给定数量的 key ，对给定客户端进行阻塞
- *
- * 参数：
- *  keys    任意多个 key
- *  numkeys keys 的键数量
- *  timeout 阻塞的最长时限
- *  target  在解除阻塞时，将结果保存到这个 key 对象，而不是返回给客户端
- *          只用于 BRPOPLPUSH 命令
- */
-void blockForKeys(redisClient *c, robj **keys, int numkeys, time_t timeout, robj *target) {
+ * timeout */
+// 根据给定数量的 key ，对给定客户端进行阻塞
+// 参数：
+// keys    任意多个 key
+// numkeys keys 的键数量
+// timeout 阻塞的最长时限
+// target  在解除阻塞时，将结果保存到这个 key 对象，而不是返回给客户端
+//         只用于 BRPOPLPUSH 命令
+void blockForKeys(redisClient *c, robj **keys, int numkeys, mstime_t timeout, robj *target) {
     dictEntry *de;
     list *l;
     int j;
@@ -1183,19 +1180,11 @@ void blockForKeys(redisClient *c, robj **keys, int numkeys, time_t timeout, robj
         // 将客户端填接到被阻塞客户端的链表中
         listAddNodeTail(l,c);
     }
-
-    /* Mark the client as a blocked client */
-    // 将客户端的状态设为“被阻塞”
-    c->flags |= REDIS_BLOCKED;
-
-    // 将服务器的被阻塞客户端计数器增一
-    server.bpop_blocked_clients++;
+    blockClient(c,REDIS_BLOCKED_LIST);
 }
 
-/* Unblock a client that's waiting in a blocking operation such as BLPOP */
-/*
- * 取消客户端的阻塞状态
- */
+/* Unblock a client that's waiting in a blocking operation such as BLPOP.
+ * You should never call this function directly, but unblockClient() instead. */
 void unblockClientWaitingData(redisClient *c) {
     dictEntry *de;
     dictIterator *di;
@@ -1232,15 +1221,6 @@ void unblockClientWaitingData(redisClient *c) {
         decrRefCount(c->bpop.target);
         c->bpop.target = NULL;
     }
-
-    // 清除客户端的阻塞状态
-    c->flags &= ~REDIS_BLOCKED;
-    c->flags |= REDIS_UNBLOCKED;
-
-    server.bpop_blocked_clients--;
-
-    // 将客户端添加到非阻塞客户端列表中
-    listAddNodeTail(server.unblocked_clients,c);
 }
 
 /* If the specified key has clients blocked waiting for list pushes, this
@@ -1473,12 +1453,12 @@ void handleClientsBlockedOnLists(void) {
                         // 还有元素可弹出（非 NULL）
                         if (value) {
                             /* Protect receiver->bpop.target, that will be
-                             * freed by the next unblockClientWaitingData()
+                             * freed by the next unblockClient()
                              * call. */
                             if (dstkey) incrRefCount(dstkey);
 
                             // 取消客户端的阻塞状态
-                            unblockClientWaitingData(receiver);
+                            unblockClient(receiver);
 
                             // 将值 value 推入到造成客户度 receiver 阻塞的 key 上
                             if (serveClientBlockedOnList(receiver,
@@ -1515,39 +1495,15 @@ void handleClientsBlockedOnLists(void) {
     }
 }
 
-/*
- * 根据输入 timeout 值，计算绝对（positive）的超时时间。
- */
-int getTimeoutFromObjectOrReply(redisClient *c, robj *object, time_t *timeout) {
-    long tval;
-
-    // 取出 timeout 值
-    if (getLongFromObjectOrReply(c,object,&tval,
-        "timeout is not an integer or out of range") != REDIS_OK)
-        return REDIS_ERR;
-
-    // 检查是否合理
-    if (tval < 0) {
-        addReplyError(c,"timeout is negative");
-        return REDIS_ERR;
-    }
-
-    // 计算绝对 timeout 值
-    if (tval > 0) tval += server.unixtime;
-    *timeout = tval;
-
-    return REDIS_OK;
-}
-
 /* Blocking RPOP/LPOP */
 void blockingPopGenericCommand(redisClient *c, int where) {
     robj *o;
-    time_t timeout;
+    mstime_t timeout;
     int j;
 
     // 取出 timeout 参数
-    if (getTimeoutFromObjectOrReply(c,c->argv[c->argc-1],&timeout) != REDIS_OK)
-        return;
+    if (getTimeoutFromObjectOrReply(c,c->argv[c->argc-1],&timeout,UNIT_SECONDS)
+        != REDIS_OK) return;
 
     // 遍历所有列表键
     for (j = 1; j < c->argc-1; j++) {
@@ -1628,11 +1584,11 @@ void brpopCommand(redisClient *c) {
 }
 
 void brpoplpushCommand(redisClient *c) {
-    time_t timeout;
+    mstime_t timeout;
 
     // 取出 timeout 参数
-    if (getTimeoutFromObjectOrReply(c,c->argv[3],&timeout) != REDIS_OK)
-        return;
+    if (getTimeoutFromObjectOrReply(c,c->argv[3],&timeout,UNIT_SECONDS)
+        != REDIS_OK) return;
 
     // 取出列表键
     robj *key = lookupKeyWrite(c->db, c->argv[1]);

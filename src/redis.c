@@ -324,7 +324,8 @@ struct redisCommand redisCommandTable[] = {
     {"script",scriptCommand,-2,"ras",0,NULL,0,0,0,0,0},
     {"time",timeCommand,1,"rR",0,NULL,0,0,0,0,0},
     {"bitop",bitopCommand,-4,"wm",0,NULL,2,-1,1,0,0},
-    {"bitcount",bitcountCommand,-2,"r",0,NULL,1,1,1,0,0}
+    {"bitcount",bitcountCommand,-2,"r",0,NULL,1,1,1,0,0},
+    {"wait",waitCommand,3,"rs",0,NULL,0,0,0,0,0}
 };
 
 /*============================ Utility functions ============================ */
@@ -644,6 +645,18 @@ dictType clusterNodesDictType = {
     NULL,                       /* key dup */
     NULL,                       /* val dup */
     dictSdsKeyCompare,          /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    NULL                        /* val destructor */
+};
+
+/* Cluster re-addition blacklist. This maps node IDs to the time
+ * we can re-add this node. The goal is to avoid readding a removed
+ * node for some time. */
+dictType clusterNodesBlackListDictType = {
+    dictSdsCaseHash,            /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCaseCompare,      /* key compare */
     dictSdsDestructor,          /* key destructor */
     NULL                        /* val destructor */
 };
@@ -1056,7 +1069,7 @@ long long getOperationsPerSecond(void) {
 int clientsCronHandleTimeout(redisClient *c) {
 
     // 获取当前时间
-    time_t now = server.unixtime;
+    mstime_t now = mstime();
 
     // 服务器设置了 maxidletime 时间
     if (server.maxidletime &&
@@ -1082,9 +1095,9 @@ int clientsCronHandleTimeout(redisClient *c) {
         // 如果是的话，取消客户端的阻塞
         if (c->bpop.timeout != 0 && c->bpop.timeout < now) {
             // 向客户端返回空回复
-            addReply(c,shared.nullmultibulk);
+            replyToBlockedClientTimedOut(c);
             // 取消客户端的阻塞状态
-            unblockClientWaitingData(c);
+            unblockClient(c);
         }
     }
 
@@ -1524,8 +1537,6 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 // 每次处理事件之前执行
 void beforeSleep(struct aeEventLoop *eventLoop) {
     REDIS_NOTUSED(eventLoop);
-    listNode *ln;
-    redisClient *c;
 
     /* Run a fast expire cycle (the called function will return
      * ASAP if a fast cycle is not needed). */
@@ -1533,22 +1544,29 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     if (server.active_expire_enabled && server.masterhost == NULL)
         activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST);
 
-    /* Try to process pending commands for clients that were just unblocked. */
-    // 解除所有原来被阻塞的客户端
-    while (listLength(server.unblocked_clients)) {
-        ln = listFirst(server.unblocked_clients);
-        redisAssert(ln != NULL);
-        c = ln->value;
-        listDelNode(server.unblocked_clients,ln);
-        c->flags &= ~REDIS_UNBLOCKED;
+    /* Send all the slaves an ACK request if at least one client blocked
+     * during the previous event loop iteration. */
+    if (server.get_ack_from_slaves) {
+        robj *argv[3];
 
-        /* Process remaining data in the input buffer. */
-        if (c->querybuf && sdslen(c->querybuf) > 0) {
-            server.current_client = c;
-            processInputBuffer(c);
-            server.current_client = NULL;
-        }
+        argv[0] = createStringObject("REPLCONF",8);
+        argv[1] = createStringObject("GETACK",6);
+        argv[2] = createStringObject("*",1); /* Not used argument. */
+        replicationFeedSlaves(server.slaves, server.slaveseldb, argv, 3);
+        decrRefCount(argv[0]);
+        decrRefCount(argv[1]);
+        decrRefCount(argv[2]);
+        server.get_ack_from_slaves = 0;
     }
+
+    /* Unblock all the clients blocked for synchronous replication
+     * in WAIT. */
+    if (listLength(server.clients_waiting_acks))
+        processClientsWaitingReplicas();
+
+    /* Try to process pending commands for clients that were just unblocked. */
+    if (listLength(server.unblocked_clients))
+        processUnblockedClients();
 
     /* Write the AOF buffer on disk */
     // 将 AOF 缓冲区的内容写入到 AOF 文件
@@ -1942,6 +1960,8 @@ void initServer() {
     server.slaveseldb = -1; /* Force to emit the first SELECT command. */
     server.unblocked_clients = listCreate();
     server.ready_keys = listCreate();
+    server.clients_waiting_acks = listCreate();
+    server.get_ack_from_slaves = 0;
 
     // 创建共享对象
     createSharedObjects();
@@ -2596,6 +2616,8 @@ int processCommand(redisClient *c) {
     } else {
         // 执行命令
         call(c,REDIS_CALL_FULL);
+
+        c->woff = server.master_repl_offset;
         // 处理那些解除了阻塞的键
         if (listLength(server.ready_keys))
             handleClientsBlockedOnLists();
