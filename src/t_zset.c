@@ -657,24 +657,23 @@ unsigned long zslDeleteRangeByRank(zskiplist *zsl, unsigned int start, unsigned 
  *
  * 注意，因为跳跃表的表头也被计算在内，所以返回的排位以 1 为起始值。
  *
- * T_wrost = O(N^2), T_avg = O(N log N)
+ * T_wrost = O(N), T_avg = O(log N)
  */
 unsigned long zslGetRank(zskiplist *zsl, double score, robj *o) {
     zskiplistNode *x;
     unsigned long rank = 0;
     int i;
 
-    // T_wrost = O(N^2), T_avg = O(N log N)
+    // 遍历整个跳跃表
     x = zsl->header;
     for (i = zsl->level-1; i >= 0; i--) {
 
         // 遍历节点并对比元素
-        // T_wrost = O(N^2) , T_avg = O(N log N)
         while (x->level[i].forward &&
             (x->level[i].forward->score < score ||
                 // 比对分值
                 (x->level[i].forward->score == score &&
-                // 比对成员对象， T = O(N)
+                // 比对成员对象
                 compareStringObjects(x->level[i].forward->obj,o) <= 0))) {
 
             // 累积跨越的节点数量
