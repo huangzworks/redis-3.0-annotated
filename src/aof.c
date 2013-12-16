@@ -1185,7 +1185,7 @@ int rewriteSortedSetObject(rio *r, robj *key, robj *o) {
     return 1;
 }
 
-/* Write either the key or the value of the currently selected item of an hash.
+/* Write either the key or the value of the currently selected item of a hash.
  *
  * 选择写入哈希的 key 或者 value 到 r 中。
  *

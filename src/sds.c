@@ -698,7 +698,7 @@ sds sdstrim(sds s, const char *cset) {
  * Example:
  *
  * s = sdsnew("Hello World");
- * sdstrim(s,1,-1); => "ello Worl"
+ * sdsrange(s,1,-1); => "ello World"
  */
 void sdsrange(sds s, int start, int end) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
@@ -964,7 +964,7 @@ int is_hex_digit(char c) {
            (c >= 'A' && c <= 'F');
 }
 
-/* Helper function for sdssplitargs() that converts an hex digit into an
+/* Helper function for sdssplitargs() that converts a hex digit into an
  * integer from 0 to 15 */
 /*
  * 将十六进制符号转换为 10 进制

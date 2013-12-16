@@ -10,7 +10,7 @@
  * 这个数据结构非常节约内存，并且支持复杂度为 O(N) 的查找操作。
  *
  * The Redis Hash type uses this data structure for hashes composed of a small
- * number of elements, to switch to an hash table once a given number of
+ * number of elements, to switch to a hash table once a given number of
  * elements is reached.
  * 
  * Redis 使用这个数据结构来储存键值对数量不多的 Hash ，

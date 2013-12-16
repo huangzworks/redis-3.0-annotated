@@ -1176,7 +1176,7 @@ void evalGenericCommand(redisClient *c, int evalsha) {
     // 为 Lua 所属的伪客户端设置数据库
     selectDb(server.lua_client,c->db->id);
     
-    /* Set an hook in order to be able to stop the script execution if it
+    /* Set a hook in order to be able to stop the script execution if it
      * is running for too much time.
      *
      * 设置一个钩子，用于在脚本运行时间过长时，停止脚本并等待用户的 SCRIPT 命令
@@ -1414,7 +1414,7 @@ void scriptCommand(redisClient *c) {
         if (server.lua_caller == NULL) {
             addReplySds(c,sdsnew("-NOTBUSY No scripts in execution right now.\r\n"));
         } else if (server.lua_write_dirty) {
-            addReplySds(c,sdsnew("-UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the script termination or kill the server in an hard way using the SHUTDOWN NOSAVE command.\r\n"));
+            addReplySds(c,sdsnew("-UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the script termination or kill the server in a hard way using the SHUTDOWN NOSAVE command.\r\n"));
         } else {
             server.lua_kill = 1;
             addReply(c,shared.ok);

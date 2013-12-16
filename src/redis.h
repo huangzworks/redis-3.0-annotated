@@ -586,8 +586,9 @@ typedef struct redisClient {
     int replstate;          /* replication state if this is a slave */
     // 用于保存主服务器传来的 RDB 文件的文件描述符
     int repldbfd;           /* replication DB file descriptor */
+
     // 读取主服务器传来的 RDB 文件的偏移量
-    long repldboff;         /* replication DB file offset */
+    off_t repldboff;        /* replication DB file offset */
     // 主服务器传来的 RDB 文件的大小
     off_t repldbsize;       /* replication DB file size */
     
@@ -1624,6 +1625,7 @@ int replicationScriptCacheExists(sds sha1);
 void processClientsWaitingReplicas(void);
 void unblockClientWaitingReplicas(redisClient *c);
 int replicationCountAcksByOffset(long long offset);
+void replicationSendNewlineToMaster(void);
 
 /* Generic persistence functions */
 void startLoading(FILE *fp);
@@ -1774,7 +1776,7 @@ void setKey(redisDb *db, robj *key, robj *val);
 int dbExists(redisDb *db, robj *key);
 robj *dbRandomKey(redisDb *db);
 int dbDelete(redisDb *db, robj *key);
-long long emptyDb();
+long long emptyDb(void(callback)(void*));
 int selectDb(redisClient *c, int id);
 void signalModifiedKey(redisDb *db, robj *key);
 void signalFlushedDb(int dbid);

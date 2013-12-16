@@ -1168,12 +1168,13 @@ void resetClient(redisClient *c) {
  * argv[2] = arg2
  */
 int processInlineBuffer(redisClient *c) {
-
-    // 定位到命令的末尾
-    char *newline = strstr(c->querybuf,"\r\n");
+    char *newline;
     int argc, j;
     sds *argv, aux;
     size_t querylen;
+
+    /* Search for end of line */
+    newline = strchr(c->querybuf,'\n');
 
     /* Nothing to do without a \r\n */
     // 收到的查询内容不符合协议格式，出错
@@ -1184,6 +1185,10 @@ int processInlineBuffer(redisClient *c) {
         }
         return REDIS_ERR;
     }
+
+    /* Handle the \r\n case. */
+    if (newline && newline != c->querybuf && *(newline-1) == '\r')
+        newline--;
 
     /* Split the input buffer up to the \r\n */
     // 根据空格，分割命令的参数
@@ -1196,6 +1201,17 @@ int processInlineBuffer(redisClient *c) {
     aux = sdsnewlen(c->querybuf,querylen);
     argv = sdssplitargs(aux,&argc);
     sdsfree(aux);
+    if (argv == NULL) {
+        addReplyError(c,"Protocol error: unbalanced quotes in request");
+        setProtocolError(c,0);
+        return REDIS_ERR;
+    }
+
+    /* Newline from slaves can be used to refresh the last ACK time.
+     * This is useful for a slave to ping back while loading a big
+     * RDB file. */
+    if (querylen == 0 && c->flags & REDIS_SLAVE)
+        c->repl_ack_time = server.unixtime;
 
     /* Leave data after the first line of the query in the buffer */
 
@@ -1596,7 +1612,7 @@ void getClientsMaxBuffers(unsigned long *longest_output_list,
     *biggest_input_buffer = bib;
 }
 
-/* This is an helper function for getClientPeerId().
+/* This is a helper function for getClientPeerId().
  * It writes the specified ip/port to "peerid" as a null termiated string
  * in the form ip:port if ip does not contain ":" itself, otherwise
  * [ip]:port format is used (for IPv6 addresses basically). */

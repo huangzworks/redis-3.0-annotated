@@ -57,8 +57,8 @@
  * 这在 Redis 使用子进程进行保存操作时，可以有效地利用 copy-on-write 机制。
  *
  * Note that even when dict_can_resize is set to 0, not all resizes are
- * prevented: an hash table is still allowed to grow if the ratio between
- * the number of elements and the buckets > dict_force_resize_ratio. 
+ * prevented: a hash table is still allowed to grow if the ratio between
+ * the number of elements and the buckets > dict_force_resize_ratio.
  *
  * 需要注意的是，并非所有 rehash 都会被 dictDisableResize 阻止：
  * 如果已使用节点的数量和字典大小之间的比率，
@@ -748,8 +748,7 @@ int dictDeleteNoFree(dict *ht, const void *key) {
  *
  * T = O(N)
  */
-int _dictClear(dict *d, dictht *ht)
-{
+int _dictClear(dict *d, dictht *ht, void(callback)(void *)) {
     unsigned long i;
 
     /* Free all the elements */
@@ -757,6 +756,8 @@ int _dictClear(dict *d, dictht *ht)
     // T = O(N)
     for (i = 0; i < ht->size && ht->used > 0; i++) {
         dictEntry *he, *nextHe;
+
+        if (callback && (i & 65535) == 0) callback(d->privdata);
 
         // 跳过空索引
         if ((he = ht->table[i]) == NULL) continue;
@@ -800,9 +801,8 @@ int _dictClear(dict *d, dictht *ht)
 void dictRelease(dict *d)
 {
     // 删除并清空两个哈希表
-    _dictClear(d,&d->ht[0]);
-    _dictClear(d,&d->ht[1]);
-
+    _dictClear(d,&d->ht[0],NULL);
+    _dictClear(d,&d->ht[1],NULL);
     // 释放节点结构
     zfree(d);
 }
@@ -1392,7 +1392,7 @@ static unsigned long _dictNextPower(unsigned long size)
 }
 
 /* Returns the index of a free slot that can be populated with
- * an hash entry for the given 'key'.
+ * a hash entry for the given 'key'.
  * If the key already exists, -1 is returned.
  *
  * 返回可以将 key 插入到哈希表的索引位置
@@ -1450,13 +1450,12 @@ static int _dictKeyIndex(dict *d, const void *key)
  *
  * T = O(N)
  */
-void dictEmpty(dict *d) {
+void dictEmpty(dict *d, void(callback)(void*)) {
 
     // 删除两个哈希表上的所有节点
     // T = O(N)
-    _dictClear(d,&d->ht[0]);
-    _dictClear(d,&d->ht[1]);
-
+    _dictClear(d,&d->ht[0],callback);
+    _dictClear(d,&d->ht[1],callback);
     // 重置属性 
     d->rehashidx = -1;
     d->iterators = 0;

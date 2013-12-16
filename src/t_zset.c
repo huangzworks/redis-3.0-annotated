@@ -39,7 +39,7 @@
  * ZSET 同时使用两种数据结构来持有同一个元素，
  * 从而提供 O(log(N)) 复杂度的有序数据结构的插入和移除操作。
  *
- * The elements are added to an hash table mapping Redis objects to scores.
+ * The elements are added to a hash table mapping Redis objects to scores.
  * At the same time the elements are added to a skip list mapping scores
  * to Redis objects (so objects are sorted by scores in this "view"). 
  *

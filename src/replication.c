@@ -909,6 +909,31 @@ void replicationAbortSyncTransfer(void) {
     server.repl_state = REDIS_REPL_CONNECT;
 }
 
+/* Avoid the master to detect the slave is timing out while loading the
+ * RDB file in initial synchronization. We send a single newline character
+ * that is valid protocol but is guaranteed to either be sent entierly or
+ * not, since the byte is indivisible.
+ *
+ * The function is called in two contexts: while we flush the current
+ * data with emptyDb(), and while we load the new data received as an
+ * RDB file from the master. */
+void replicationSendNewlineToMaster(void) {
+    static time_t newline_sent;
+    if (time(NULL) != newline_sent) {
+        newline_sent = time(NULL);
+        if (write(server.repl_transfer_s,"\n",1) == -1) {
+            /* Pinging back in this stage is best-effort. */
+        }
+    }
+}
+
+/* Callback used by emptyDb() while flushing away old data to load
+ * the new dataset received by the master. */
+void replicationEmptyDbCallback(void *privdata) {
+    REDIS_NOTUSED(privdata);
+    replicationSendNewlineToMaster();
+}
+
 /* Asynchronously read the SYNC payload we receive from a master */
 // 异步 RDB 文件读取函数
 #define REPL_MAX_WRITTEN_BEFORE_FSYNC (1024*1024*8) /* 8 MB */
@@ -1010,18 +1035,18 @@ void readSyncBulkPayload(aeEventLoop *el, int fd, void *privdata, int mask) {
             return;
         }
 
-        // 开始载入 RDB 文件到内存
-        redisLog(REDIS_NOTICE, "MASTER <-> SLAVE sync: Loading DB in memory");
-        signalFlushedDb(-1);
         // 先清空旧数据库
-        emptyDb();
+        redisLog(REDIS_NOTICE, "MASTER <-> SLAVE sync: Flushing old data");
+        signalFlushedDb(-1);
+        emptyDb(replicationEmptyDbCallback);
         /* Before loading the DB into memory we need to delete the readable
          * handler, otherwise it will get called recursively since
          * rdbLoad() will call the event loop to process events from time to
          * time for non blocking loading. */
         // 先删除主服务器的读事件监听，因为 rdbLoad() 函数也会监听读事件
         aeDeleteFileEvent(server.el,server.repl_transfer_s,AE_READABLE);
-        // 载入
+
+        // 载入 RDB
         if (rdbLoad(server.rdb_filename) != REDIS_OK) {
             redisLog(REDIS_WARNING,"Failed trying to load the MASTER synchronization DB from disk");
             replicationAbortSyncTransfer();
@@ -1850,7 +1875,7 @@ void refreshGoodSlavesCount(void) {
  * 将那些已经发送给所有已连接从服务器的脚本保存到缓存里面，
  * 这样在执行过一次 EVAL 之后，其他时候都可以直接发送 EVALSHA 了。
  *
- * We use a capped collection implemented by an hash table for fast lookup
+ * We use a capped collection implemented by a hash table for fast lookup
  * of scripts we can send as EVALSHA, plus a linked list that is used for
  * eviction of the oldest entry when the max number of items is reached.
  *
@@ -1937,7 +1962,7 @@ void replicationScriptCacheInit(void) {
  *    在没有任何从服务器，AOF 关闭的时候，为节约内存而执行清空。
  */
 void replicationScriptCacheFlush(void) {
-    dictEmpty(server.repl_scriptcache_dict);
+    dictEmpty(server.repl_scriptcache_dict,NULL);
     listRelease(server.repl_scriptcache_fifo);
     server.repl_scriptcache_fifo = listCreate();
 }

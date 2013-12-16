@@ -312,7 +312,7 @@ int dbDelete(redisDb *db, robj *key) {
 /*
  * 清空服务器的所有数据。
  */
-long long emptyDb() {
+long long emptyDb(void(callback)(void*)) {
     int j;
     long long removed = 0;
 
@@ -323,10 +323,9 @@ long long emptyDb() {
         removed += dictSize(server.db[j].dict);
 
         // 删除所有键值对
-        dictEmpty(server.db[j].dict);
-
+        dictEmpty(server.db[j].dict,callback);
         // 删除所有键的过期时间
-        dictEmpty(server.db[j].expires);
+        dictEmpty(server.db[j].expires,callback);
     }
 
     if (server.cluster_enabled) slotToKeyFlush();
@@ -390,9 +389,8 @@ void flushdbCommand(redisClient *c) {
     signalFlushedDb(c->db->id);
 
     // 清空指定数据库中的 dict 和 expires 字典
-    dictEmpty(c->db->dict);
-    dictEmpty(c->db->expires);
-
+    dictEmpty(c->db->dict,NULL);
+    dictEmpty(c->db->expires,NULL);
     if (server.cluster_enabled) slotToKeyFlush();
 
     addReply(c,shared.ok);
@@ -407,8 +405,7 @@ void flushallCommand(redisClient *c) {
     signalFlushedDb(-1);
 
     // 清空所有数据库
-    server.dirty += emptyDb();
-
+    server.dirty += emptyDb(NULL);
     addReply(c,shared.ok);
 
     // 如果正在保存新的 RDB ，那么取消保存操作
@@ -600,7 +597,7 @@ int parseScanCursorOrReply(redisClient *c, robj *o, unsigned long *cursor) {
  *
  * 这是 SCAN 、 HSCAN 、 SSCAN 命令的实现函数。
  *
- * If object 'o' is passed, then it must be an Hash or Set object, otherwise
+ * If object 'o' is passed, then it must be a Hash or Set object, otherwise
  * if 'o' is NULL the command will operate on the dictionary associated with
  * the current database.
  *
@@ -614,7 +611,7 @@ int parseScanCursorOrReply(redisClient *c, robj *o, unsigned long *cursor) {
  * 如果参数 o 不为 NULL ，那么说明它是一个键对象，函数将跳过这些键对象，
  * 对给定的命令选项进行分析（parse）。
  *
- * In the case of an Hash object the function returns both the field and value
+ * In the case of a Hash object the function returns both the field and value
  * of every element on the Hash. 
  *
  * 如果被迭代的是哈希对象，那么函数返回的是键值对。
@@ -684,7 +681,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
     /* Step 2: Iterate the collection.
      *
      * Note that if the object is encoded with a ziplist, intset, or any other
-     * representation that is not an hash table, we are sure that it is also
+     * representation that is not a hash table, we are sure that it is also
      * composed of a small number of elements. So to avoid taking state we
      * just return everything inside the object in a single call, setting the
      * cursor to zero to signal the end of the iteration. */
@@ -694,7 +691,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
      // 我们将 ziplist 或者 intset 里面的所有元素都一次返回给调用者
      // 并向调用者返回游标（cursor） 0
 
-    /* Handle the case of an hash table. */
+    /* Handle the case of a hash table. */
     ht = NULL;
     if (o == NULL) {
         // 迭代目标为数据库
@@ -784,7 +781,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
             listDelNode(keys, node);
         }
 
-        /* If this is an hash or a sorted set, we have a flat list of
+        /* If this is a hash or a sorted set, we have a flat list of
          * key-value elements, so if this element was filtered, remove the
          * value, or skip it if it was not filtered: we only match keys. */
         if (o && (o->type == REDIS_ZSET || o->type == REDIS_HASH)) {

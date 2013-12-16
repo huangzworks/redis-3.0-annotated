@@ -231,7 +231,7 @@ typedef struct sentinelRedisInstance {
     // 最后一次接收到这个 sentinel 发来的问候信息的时间
     // 只在当前实例为 sentinel 时使用
     mstime_t last_hello_time; /* Only used if SRI_SENTINEL is set. Last time
-                                 we received an hello from this Sentinel
+                                 we received a hello from this Sentinel
                                  via Pub/Sub. */
 
     // 最后一次回复 SENTINEL is-master-down-by-addr 命令的时间
@@ -626,9 +626,9 @@ void initSentinel(void) {
 
     /* Remove usual Redis commands from the command table, then just add
      * the SENTINEL command. */
-    // 清空 Redis 服务器的命令表（该表用于普通模式）
-    dictEmpty(server.commands);
 
+    // 清空 Redis 服务器的命令表（该表用于普通模式）
+    dictEmpty(server.commands,NULL);
     // 将 SENTINEL 模式所用的命令添加进命令表
     for (j = 0; j < sizeof(sentinelcmds)/sizeof(sentinelcmds[0]); j++) {
         int retval;
@@ -1615,7 +1615,8 @@ void sentinelResetMaster(sentinelRedisInstance *ri, int flags) {
     ri->slave_master_host = NULL;
     ri->last_avail_time = mstime();
     ri->last_pong_time = mstime();
-
+    ri->role_reported_time = mstime();
+    ri->role_reported = SRI_MASTER;
     // 发送主服务器重置事件
     if (flags & SENTINEL_GENERATE_EVENT)
         sentinelEvent(REDIS_WARNING,"+reset-master",ri,"%@");
@@ -2080,7 +2081,7 @@ void sentinelFlushConfig(void) {
 
 /* ====================== hiredis connection handling ======================= */
 
-/* Completely disconnect an hiredis link from an instance. */
+/* Completely disconnect a hiredis link from an instance. */
 // 断开实例的连接
 void sentinelKillLink(sentinelRedisInstance *ri, redisAsyncContext *c) {
     if (ri->cc == c) {
@@ -2097,7 +2098,7 @@ void sentinelKillLink(sentinelRedisInstance *ri, redisAsyncContext *c) {
     redisAsyncFree(c);
 }
 
-/* This function takes an hiredis context that is in an error condition
+/* This function takes a hiredis context that is in an error condition
  * and make sure to mark the instance as disconnected performing the
  * cleanup needed.
  *
@@ -2297,8 +2298,6 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
     sds *lines;
     int numlines, j;
     int role = 0;
-    int runid_changed = 0;  /* true if runid changed. */
-    int first_runid = 0;    /* true if this is the first runid we receive. */
 
     /* The following fields must be reset to a given value in the case they
      * are not found at all in the INFO output. */
@@ -2319,17 +2318,9 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
             // 新设置 runid
             if (ri->runid == NULL) {
                 ri->runid = sdsnewlen(l+7,40);
-                // 标记这是新设置的 runid
-                first_runid = 1;
-
-            // 更新 runid
             } else {
+                // RUNID 不同，说明服务器已重启
                 if (strncmp(ri->runid,l+7,40) != 0) {
-
-                    // 标记 runid 已改变
-                    runid_changed = 1;
-
-                    // 发送重启事件
                     sentinelEvent(REDIS_NOTICE,"+reboot",ri,"%@");
 
                     // 释放旧 ID ，设置新 ID
@@ -2452,34 +2443,26 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
      * 如果 sentinel 进入了 TILT 模式，那么可能只有一部分动作会被执行
      */
 
+    /* Remember when the role changed. */
+    if (role != ri->role_reported) {
+        ri->role_reported_time = mstime();
+        ri->role_reported = role;
+        if (role == SRI_SLAVE) ri->slave_conf_change_time = mstime();
+    }
+
     /* Handle master -> slave role switch. */
     // 实例被 Sentinel 标识为主服务器，但根据 INFO 命令的回复
     // 这个实例的身份为从服务器
     if ((ri->flags & SRI_MASTER) && role == SRI_SLAVE) {
-
-        // 这是实例第一次通过 INFO 回复报告自己是一个从服务器
-        // 更新相关属性
-        if (ri->role_reported != SRI_SLAVE) {
-            // 报告时间
-            ri->role_reported_time = mstime();
-            // 报告的身份
-            ri->role_reported = SRI_SLAVE;
-            // 身份改变时间
-            ri->slave_conf_change_time = mstime();
-        }
+        /* Nothing to do, but masters claiming to be slaves are
+         * considered to be unreachable by Sentinel, so eventually
+         * a failover will be triggered. */
+        // 如果一个主服务器变为从服务器，那么 Sentinel 将这个主服务器看作是不可用的
     }
 
     /* Handle slave -> master role switch. */
     // 处理从服务器转变为主服务器的情况
     if ((ri->flags & SRI_SLAVE) && role == SRI_MASTER) {
-
-        // 这是实例第一次通过 INFO 回复报告自己是一个主服务器
-        // 更新相关属性
-        if (ri->role_reported != SRI_MASTER) {
-            ri->role_reported_time = mstime();
-            ri->role_reported = SRI_MASTER;
-        }
-
         /* If this is a promoted slave we can change state to the
          * failover state machine. */
         // 如果这是被选中升级为新主服务器的从服务器
@@ -4415,8 +4398,6 @@ void sentinelFailoverSwitchToPromotedSlave(sentinelRedisInstance *master) {
     /// 选出要添加的 master
     sentinelRedisInstance *ref = master->promoted_slave ?
                                  master->promoted_slave : master;
-    sds old_master_ip;
-    int old_master_port;
 
     // 发送更新 master 事件
     sentinelEvent(REDIS_WARNING,"+switch-master",master,"%s %s %d %s %d",
@@ -4425,13 +4406,8 @@ void sentinelFailoverSwitchToPromotedSlave(sentinelRedisInstance *master) {
         // 新 master 信息
         ref->addr->ip, ref->addr->port);
 
-    // 记录原 master 信息
-    old_master_ip = sdsdup(master->addr->ip);
-    old_master_port = master->addr->port;
-
     // 用新主服务器的信息代替原 master 的信息
     sentinelResetMasterAndChangeAddress(master,ref->addr->ip,ref->addr->port);
-    sdsfree(old_master_ip);
 }
 
 // 执行故障转移

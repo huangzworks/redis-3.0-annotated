@@ -1018,8 +1018,8 @@ unsigned long estimateObjectIdleTime(robj *o) {
     }
 }
 
-/* This is an helper function for the DEBUG command. We need to lookup keys
- * without any modification of LRU or other parameters. 
+/* This is a helper function for the DEBUG command. We need to lookup keys
+ * without any modification of LRU or other parameters.
  *
  * DEBUG 命令的辅助函数，用于在不修改 LRU 时间的情况下，尝试获取 key 对象
  */

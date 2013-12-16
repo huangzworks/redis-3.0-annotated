@@ -55,8 +55,8 @@ redisSortOperation *createSortOperation(int type, robj *pattern) {
  *	  模式中出现的第一个 '*' 字符被替换为 subst
  *
  * 2) If 'pattern' matches the "->" string, everything on the left of
- *    the arrow is treated as the name of an hash field, and the part on the
- *    left as the key name containing an hash. The value of the specified
+ *    the arrow is treated as the name of a hash field, and the part on the
+ *    left as the key name containing a hash. The value of the specified
  *    field is returned.
  *	  如果模式中包含一个 "->" 字符串，
  *    那么字符串的左边部分会被看作是一个 Hash 键的名字，
