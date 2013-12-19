@@ -1515,7 +1515,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     run_with_period(1000) replicationCron();
 
     /* Run the Redis Cluster cron. */
-    // 集群。。。TODO
+    // 如果服务器运行在集群模式下，那么执行集群操作
     run_with_period(100) {
         if (server.cluster_enabled) clusterCron();
     }

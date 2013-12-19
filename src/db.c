@@ -174,6 +174,7 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
     // 如果键已经存在，那么停止
     redisAssertWithInfo(NULL,key,retval == REDIS_OK);
 
+    // 如果开启了集群模式，那么将键保存到槽里面
     if (server.cluster_enabled) slotToKeyAdd(key);
  }
 
@@ -301,6 +302,7 @@ int dbDelete(redisDb *db, robj *key) {
 
     // 删除键值对
     if (dictDelete(db->dict,key->ptr) == DICT_OK) {
+        // 如果开启了集群模式，那么从槽中删除给定的键
         if (server.cluster_enabled) slotToKeyDel(key);
         return 1;
     } else {
@@ -328,6 +330,7 @@ long long emptyDb(void(callback)(void*)) {
         dictEmpty(server.db[j].expires,callback);
     }
 
+    // 如果开启了集群模式，那么还要移除槽记录
     if (server.cluster_enabled) slotToKeyFlush();
 
     // 返回键的数量
@@ -391,6 +394,8 @@ void flushdbCommand(redisClient *c) {
     // 清空指定数据库中的 dict 和 expires 字典
     dictEmpty(c->db->dict,NULL);
     dictEmpty(c->db->expires,NULL);
+
+    // 如果开启了集群模式，那么还要移除槽记录
     if (server.cluster_enabled) slotToKeyFlush();
 
     addReply(c,shared.ok);
@@ -1432,24 +1437,34 @@ int *zunionInterGetKeys(struct redisCommand *cmd,robj **argv, int argc, int *num
 /* Slot to Key API. This is used by Redis Cluster in order to obtain in
  * a fast way a key that belongs to a specified hash slot. This is useful
  * while rehashing the cluster. */
+// 将给定键添加到槽里面，
+// 节点的 slots_to_keys 用跳跃表记录了 slot -> key 之间的映射
+// 这样可以快速地处理槽和键的关系，在 rehash 槽时很有用。
 void slotToKeyAdd(robj *key) {
+
+    // 计算出键所属的槽
     unsigned int hashslot = keyHashSlot(key->ptr,sdslen(key->ptr));
 
+    // 将槽 slot 作为分值，键作为成员，添加到 slots_to_keys 跳跃表里面
     zslInsert(server.cluster->slots_to_keys,hashslot,key);
     incrRefCount(key);
 }
 
+// 从槽中删除给定的键 key
 void slotToKeyDel(robj *key) {
     unsigned int hashslot = keyHashSlot(key->ptr,sdslen(key->ptr));
 
     zslDelete(server.cluster->slots_to_keys,hashslot,key);
 }
 
+// 清空节点所有槽保存的所有键
 void slotToKeyFlush(void) {
     zslFree(server.cluster->slots_to_keys);
     server.cluster->slots_to_keys = zslCreate();
 }
 
+// 记录 count 个属于 hashslot 槽的键到 keys 数组
+// 并返回被记录键的数量
 unsigned int getKeysInSlot(unsigned int hashslot, robj **keys, unsigned int count) {
     zskiplistNode *n;
     zrangespec range;
@@ -1458,14 +1473,20 @@ unsigned int getKeysInSlot(unsigned int hashslot, robj **keys, unsigned int coun
     range.min = range.max = hashslot;
     range.minex = range.maxex = 0;
     
+    // 定位到第一个属于指定 slot 的键上面
     n = zslFirstInRange(server.cluster->slots_to_keys, range);
+    // 遍历跳跃表，并保存属于指定 slot 的键
+    // n && n->score 检查当前键是否属于指定 slot
+    // && count-- 用来计数
     while(n && n->score == hashslot && count--) {
+        // 记录键
         keys[j++] = n->obj;
         n = n->level[0].forward;
     }
     return j;
 }
 
+// 返回指定 slot 包含的键数量
 unsigned int countKeysInSlot(unsigned int hashslot) {
     zskiplist *zsl = server.cluster->slots_to_keys;
     zskiplistNode *zn;
@@ -1476,21 +1497,33 @@ unsigned int countKeysInSlot(unsigned int hashslot) {
     range.minex = range.maxex = 0;
 
     /* Find first element in range */
+    // 定位到第一个在指定 slot 上的键
     zn = zslFirstInRange(zsl, range);
 
     /* Use rank of first element, if any, to determine preliminary count */
+    // 使用第一个指定 slot 键的排位减去最后一个指定 slot 键的排位
+    // 这一方法来计算 slot 键的数量
+    // 类似区间算法
+
+    // 第一个在指定 slot 上的键存在
     if (zn != NULL) {
+        // 获取第一个键的排位
         rank = zslGetRank(zsl, zn->score, zn->obj);
         count = (zsl->length - (rank - 1));
 
         /* Find last element in range */
+        // 获取最后一个指定 slot 的键
         zn = zslLastInRange(zsl, range);
 
         /* Use rank of last element, if any, to determine the actual count */
+        // 最后一个键存在
         if (zn != NULL) {
+            // 获取排位
             rank = zslGetRank(zsl, zn->score, zn->obj);
+            // 计算数量
             count -= (zsl->length - rank);
         }
     }
+
     return count;
 }
