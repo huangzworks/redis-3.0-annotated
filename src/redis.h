@@ -467,7 +467,7 @@ typedef struct multiCmd {
  */
 typedef struct multiState {
 
-    // 命令队列，FIFO 顺序
+    // 事务队列，FIFO 顺序
     multiCmd *commands;     /* Array of MULTI commands */
 
     // 已入队命令计数
