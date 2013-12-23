@@ -1891,7 +1891,7 @@ void refreshGoodSlavesCount(void) {
  * if we need to rebuild the cache from scratch from time to time, every used
  * script will need to be transmitted a single time to reappear in the cache.
  *
- * Redis 我们为每个从服务器保存独立的脚本缓存，
+ * Redis 我们不是为每个从服务器保存独立的脚本缓存，
  * 而是让所有从服务器都共用一个全局缓存。
  * 这是因为重新填充脚本到缓存中的操作并不昂贵，
  * 这个程序的目的是避免在短时间内发送同一个大脚本多次，
