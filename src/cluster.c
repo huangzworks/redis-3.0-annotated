@@ -3034,6 +3034,8 @@ int getSlotOrReply(redisClient *c, robj *o) {
 
 // CLUSTER 命令的实现
 void clusterCommand(redisClient *c) {
+
+    // 不能在非集群模式下使用该命令
     if (server.cluster_enabled == 0) {
         addReplyError(c,"This instance has cluster support disabled");
         return;
@@ -3166,44 +3168,71 @@ void clusterCommand(redisClient *c) {
 
         if ((slot = getSlotOrReply(c,c->argv[2])) == -1) return;
 
+        // CLUSTER SETSLOT <slot> MIGRATING <node id>
+        // 将本节点的槽 slot 迁移至 node id 所指定的节点
         if (!strcasecmp(c->argv[3]->ptr,"migrating") && c->argc == 5) {
+
+            // 被迁移的槽必须属于本节点
             if (server.cluster->slots[slot] != server.cluster->myself) {
                 addReplyErrorFormat(c,"I'm not the owner of hash slot %u",slot);
                 return;
             }
+
+            // 迁移的目标节点必须是本节点已知的
             if ((n = clusterLookupNode(c->argv[4]->ptr)) == NULL) {
                 addReplyErrorFormat(c,"I don't know about node %s",
                     (char*)c->argv[4]->ptr);
                 return;
             }
+
+            // 为槽设置迁移目标节点
             server.cluster->migrating_slots_to[slot] = n;
+
+        // CLUSTER SETSLOT <slot> IMPORTING <node id>
+        // 从节点 node id 中导入槽 slot 到本节点
         } else if (!strcasecmp(c->argv[3]->ptr,"importing") && c->argc == 5) {
+
+            // 如果 slot 槽本身已经由本节点处理，那么无须进行导入
             if (server.cluster->slots[slot] == server.cluster->myself) {
                 addReplyErrorFormat(c,
                     "I'm already the owner of hash slot %u",slot);
                 return;
             }
+
+            // node id 指定的节点必须是本节点已知的，这样才能从目标节点导入槽
             if ((n = clusterLookupNode(c->argv[4]->ptr)) == NULL) {
                 addReplyErrorFormat(c,"I don't know about node %s",
                     (char*)c->argv[3]->ptr);
                 return;
             }
+
+            // 为槽设置导入目标节点
             server.cluster->importing_slots_from[slot] = n;
+
         } else if (!strcasecmp(c->argv[3]->ptr,"stable") && c->argc == 4) {
             /* CLUSTER SETSLOT <SLOT> STABLE */
+            // 取消对槽 slot 的迁移或者导入
+
             server.cluster->importing_slots_from[slot] = NULL;
             server.cluster->migrating_slots_to[slot] = NULL;
+
         } else if (!strcasecmp(c->argv[3]->ptr,"node") && c->argc == 5) {
             /* CLUSTER SETSLOT <SLOT> NODE <NODE ID> */
+            // 将未指派 slot 指派给 node id 指定的节点
+
+            // 查找目标节点
             clusterNode *n = clusterLookupNode(c->argv[4]->ptr);
 
+            // 目标节点必须已存在
             if (!n) {
                 addReplyErrorFormat(c,"Unknown node %s",
                     (char*)c->argv[4]->ptr);
                 return;
             }
+
             /* If this hash slot was served by 'myself' before to switch
              * make sure there are no longer local keys for this hash slot. */
+            // 如果这个槽由当前节点负责处理，那么必须保证槽里面没有键存在
             if (server.cluster->slots[slot] == server.cluster->myself &&
                 n != server.cluster->myself)
             {
@@ -3212,20 +3241,28 @@ void clusterCommand(redisClient *c) {
                     return;
                 }
             }
+
             /* If this node was the slot owner and the slot was marked as
              * migrating, assigning the slot to another node will clear
              * the migratig status. */
+            // 撤销本节点对 slot 的迁移计划
             if (server.cluster->slots[slot] == server.cluster->myself &&
                 server.cluster->migrating_slots_to[slot])
                 server.cluster->migrating_slots_to[slot] = NULL;
 
             /* If this node was importing this slot, assigning the slot to
              * itself also clears the importing status. */
+            // 撤销本节点对 slot 的导入计划
             if (n == server.cluster->myself &&
                 server.cluster->importing_slots_from[slot])
                 server.cluster->importing_slots_from[slot] = NULL;
+
+            // 将槽设置为未指派
             clusterDelSlot(slot);
+
+            // 将槽指派给目标节点
             clusterAddSlot(n,slot);
+
         } else {
             addReplyError(c,"Invalid CLUSTER SETSLOT action or number of arguments");
             return;
@@ -3235,24 +3272,36 @@ void clusterCommand(redisClient *c) {
 
     } else if (!strcasecmp(c->argv[1]->ptr,"info") && c->argc == 2) {
         /* CLUSTER INFO */
+        // 打印出集群的当前信息
+
         char *statestr[] = {"ok","fail","needhelp"};
         int slots_assigned = 0, slots_ok = 0, slots_pfail = 0, slots_fail = 0;
         int j;
 
+        // 统计集群中的已指派节点、已失效节点、疑似失效节点和正常节点的数量
         for (j = 0; j < REDIS_CLUSTER_SLOTS; j++) {
             clusterNode *n = server.cluster->slots[j];
 
+            // 跳过未指派节点
             if (n == NULL) continue;
+
+            // 统计已指派节点的数量
             slots_assigned++;
+
+            // 统计各个不同状态下的节点的数量
             if (n->flags & REDIS_NODE_FAIL) {
+                // 已失效节点
                 slots_fail++;
             } else if (n->flags & REDIS_NODE_PFAIL) {
+                // 疑似失效节点
                 slots_pfail++;
             } else {
+                // 正常节点
                 slots_ok++;
             }
         }
 
+        // 打印信息
         sds info = sdscatprintf(sdsempty(),
             "cluster_state:%s\r\n"
             "cluster_slots_assigned:%d\r\n"
@@ -3281,8 +3330,13 @@ void clusterCommand(redisClient *c) {
         addReply(c,shared.crlf);
 
     } else if (!strcasecmp(c->argv[1]->ptr,"saveconfig") && c->argc == 2) {
+        // CLUSTER SAVECONFIG 命令
+        // 将 nodes.conf 文件保存到磁盘里面
+
+        // 保存
         int retval = clusterSaveConfig(1);
 
+        // 检查错误
         if (retval == 0)
             addReply(c,shared.ok);
         else
