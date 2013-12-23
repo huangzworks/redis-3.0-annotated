@@ -877,15 +877,26 @@ void freeClient(redisClient *c) {
      *
      * Note that before doing this we make sure that the client is not in
      * some unexpected state, by checking its flags. */
-    if (server.master &&
-         (c->flags & REDIS_MASTER) &&
-        !(c->flags & (REDIS_CLOSE_AFTER_REPLY|
-                     REDIS_CLOSE_ASAP|
-                     REDIS_BLOCKED|
-                     REDIS_UNBLOCKED)))
-    {
-        replicationCacheMaster(c);
-        return;
+    if (server.master && c->flags & REDIS_MASTER) {
+        redisLog(REDIS_WARNING,"Connection with master lost.");
+        if (!(c->flags & (REDIS_CLOSE_AFTER_REPLY|
+                          REDIS_CLOSE_ASAP|
+                          REDIS_BLOCKED|
+                          REDIS_UNBLOCKED)))
+        {
+            replicationCacheMaster(c);
+            return;
+        }
+    }
+
+    /* Log link disconnection with slave */
+    if (c->flags & REDIS_SLAVE) {
+        char ip[REDIS_IP_STR_LEN];
+
+        if (anetPeerToString(c->fd,ip,sizeof(ip),NULL) == -1)
+            strncpy(ip,"?",REDIS_IP_STR_LEN);
+        redisLog(REDIS_WARNING,"Connection with slave %s:%d lost.",
+            ip, c->slave_listening_port);
     }
 
     /* Free the query buffer */

@@ -310,6 +310,7 @@ void clusterInit(void) {
     server.cluster->currentEpoch = 0;
     server.cluster->state = REDIS_CLUSTER_FAIL;
     server.cluster->size = 1;
+    server.cluster->todo_before_sleep = 0;
     server.cluster->nodes = dictCreate(&clusterNodesDictType,NULL);
     server.cluster->nodes_black_list =
         dictCreate(&clusterNodesBlackListDictType,NULL);
@@ -636,6 +637,7 @@ int clusterNodeAddSlave(clusterNode *master, clusterNode *slave) {
 void clusterNodeResetSlaves(clusterNode *n) {
     zfree(n->slaves);
     n->numslaves = 0;
+    n->slaves = NULL;
 }
 
 // 释放节点
@@ -884,7 +886,7 @@ void markNodeAsFailingIfNeeded(clusterNode *node) {
  * to reach it again. It checks if there are the conditions to undo the FAIL
  * state. */
 void clearNodeFailureIfNeeded(clusterNode *node) {
-    time_t now = mstime();
+    mstime_t now = mstime();
 
     redisAssert(node->flags & REDIS_NODE_FAIL);
 
@@ -917,20 +919,106 @@ void clearNodeFailureIfNeeded(clusterNode *node) {
 
 /* Return true if we already have a node in HANDSHAKE state matching the
  * specified ip address and port number. This function is used in order to
- * avoid adding a new handshake node for the same address multiple times. */
+ * avoid adding a new handshake node for the same address multiple times. 
+ *
+ * 如果当前节点已经向 ip 和 port 所指定的节点进行了握手，
+ * 那么返回 1 。
+ *
+ * 这个函数用于防止对同一个节点进行多次握手。
+ */
 int clusterHandshakeInProgress(char *ip, int port) {
     dictIterator *di;
     dictEntry *de;
 
+    // 遍历所有已知节点
     di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
 
+        // 跳过非握手状态的节点，之后剩下的都是正在握手的节点
         if (!(node->flags & REDIS_NODE_HANDSHAKE)) continue;
+
+        // 给定 ip 和 port 的节点正在进行握手
         if (!strcasecmp(node->ip,ip) && node->port == port) break;
     }
     dictReleaseIterator(di);
+
+    // 检查节点是否正在握手
     return de != NULL;
+}
+
+/* Start an handshake with the specified address if there is not one
+ * already in progress. Returns non-zero if the handshake was actually
+ * started. On error zero is returned and errno is set to one of the
+ * following values:
+ *
+ * 如果还没有与指定的地址进行过握手，那么进行握手。
+ * 返回 1 表示握手已经开始，
+ * 返回 0 并将 errno 设置为以下值来表示意外情况：
+ *
+ * EAGAIN - There is already an handshake in progress for this address.
+ *          已经有握手在进行中了。
+ * EINVAL - IP or port are not valid. 
+ *          ip 或者 port 参数不合法。
+ */
+int clusterStartHandshake(char *ip, int port) {
+    clusterNode *n;
+    char norm_ip[REDIS_IP_STR_LEN];
+    struct sockaddr_storage sa;
+
+    /* IP sanity check */
+    // ip 合法性检查
+    if (inet_pton(AF_INET,ip,
+            &(((struct sockaddr_in *)&sa)->sin_addr)))
+    {
+        sa.ss_family = AF_INET;
+    } else if (inet_pton(AF_INET6,ip,
+            &(((struct sockaddr_in6 *)&sa)->sin6_addr)))
+    {
+        sa.ss_family = AF_INET6;
+    } else {
+        errno = EINVAL;
+        return 0;
+    }
+
+    /* Port sanity check */
+    // port 合法性检查
+    if (port <= 0 || port > (65535-REDIS_CLUSTER_PORT_INCR)) {
+        errno = EINVAL;
+        return 0;
+    }
+
+    /* Set norm_ip as the normalized string representation of the node
+     * IP address. */
+    if (sa.ss_family == AF_INET)
+        inet_ntop(AF_INET,
+            (void*)&(((struct sockaddr_in *)&sa)->sin_addr),
+            norm_ip,REDIS_CLUSTER_IPLEN);
+    else
+        inet_ntop(AF_INET6,
+            (void*)&(((struct sockaddr_in6 *)&sa)->sin6_addr),
+            norm_ip,REDIS_CLUSTER_IPLEN);
+
+    // 检查节点是否已经发送握手请求，如果是的话，那么直接返回，防止出现重复握手
+    if (clusterHandshakeInProgress(norm_ip,port)) {
+        errno = EAGAIN;
+        return 0;
+    }
+
+    /* Add the node with a random address (NULL as first argument to
+     * createClusterNode()). Everything will be fixed during the
+     * handskake. */
+    // 给正在 HANDSHAKE 的新节点添加一个随机地址
+    // 当 HANDSHAKE 完成，当前节点会取得 HANDSHAKE 节点的真正地址
+    // 到时会用真地址替换随机地址
+    n = createClusterNode(NULL,REDIS_NODE_HANDSHAKE|REDIS_NODE_MEET);
+    memcpy(n->ip,norm_ip,sizeof(n->ip));
+    n->port = port;
+
+    // 添加节点
+    clusterAddNode(n);
+
+    return 1;
 }
 
 /* Process the gossip section of PING or PONG packets.
@@ -966,7 +1054,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
 
         /* Update our state accordingly to the gossip sections */
         node = clusterLookupNode(g->nodename);
-        if (node != NULL) {
+        if (node) {
             /* We already know this node.
                Handle failure reports, only when the sender is a master. */
             if (sender && sender->flags & REDIS_NODE_MASTER &&
@@ -974,18 +1062,29 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
             {
                 if (flags & (REDIS_NODE_FAIL|REDIS_NODE_PFAIL)) {
                     if (clusterNodeAddFailureReport(node,sender)) {
-                        redisLog(REDIS_NOTICE,
+                        redisLog(REDIS_VERBOSE,
                             "Node %.40s reported node %.40s as not reachable.",
                             sender->name, node->name);
                     }
                     markNodeAsFailingIfNeeded(node);
                 } else {
                     if (clusterNodeDelFailureReport(node,sender)) {
-                        redisLog(REDIS_NOTICE,
+                        redisLog(REDIS_VERBOSE,
                             "Node %.40s reported node %.40s is back online.",
                             sender->name, node->name);
                     }
                 }
+            }
+
+            /* If we already know this node, but it is not reachable, and
+             * we see a different address in the gossip section, start an
+             * handshake with the (possibly) new address: this will result
+             * into a node address update if the handshake will be
+             * successful. */
+            if (node->flags & (REDIS_NODE_FAIL|REDIS_NODE_PFAIL) &&
+                (strcasecmp(node->ip,g->ip) || node->port != ntohs(g->port)))
+            {
+                clusterStartHandshake(g->ip,ntohs(g->port));
             }
         } else {
             /* If it's not in NOADDR state and we don't have it, we
@@ -994,17 +1093,8 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
              * Note that we require that the sender of this gossip message
              * is a well known node in our cluster, otherwise we risk
              * joining another cluster. */
-            if (sender && !(flags & REDIS_NODE_NOADDR) &&
-                !clusterHandshakeInProgress(g->ip,ntohs(g->port)))
-            {
-                clusterNode *newnode;
-
-                redisLog(REDIS_DEBUG,"Adding the new node");
-                newnode = createClusterNode(NULL,REDIS_NODE_HANDSHAKE);
-                memcpy(newnode->ip,g->ip,sizeof(g->ip));
-                newnode->port = ntohs(g->port);
-                clusterAddNode(newnode);
-            }
+            if (sender && !(flags & REDIS_NODE_NOADDR))
+                clusterStartHandshake(g->ip,ntohs(g->port));
         }
 
         /* Next node */
@@ -1060,6 +1150,14 @@ int nodeUpdateAddressIfNeeded(clusterNode *node, clusterLink *link, int port) {
     if (node->link) freeClusterLink(node->link);
     redisLog(REDIS_WARNING,"Address updated for node %.40s, now %s:%d",
         node->name, node->ip, node->port);
+
+    /* Check if this is our master and we have to change the
+     * replication target as well. */
+    if (server.cluster->myself->flags & REDIS_NODE_SLAVE &&
+        server.cluster->myself->slaveof == node)
+    {
+        replicationSetMaster(node->ip, node->port);
+    }
     return 1;
 }
 
@@ -1299,11 +1397,6 @@ int clusterProcessPacket(clusterLink *link) {
                 link->node->port = 0;
                 freeClusterLink(link);
                 clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
-                /* FIXME: remove this node if we already have it.
-                 *
-                 * If we already have it but the IP is different, use
-                 * the new one if the old node is in FAIL, PFAIL, or NOADDR
-                 * status... */
                 return 0;
             }
         }
@@ -1980,6 +2073,7 @@ void clusterSendUpdate(clusterLink *link, clusterNode *node) {
     unsigned char buf[sizeof(clusterMsg)];
     clusterMsg *hdr = (clusterMsg*) buf;
 
+    if (link == NULL) return;
     clusterBuildMessageHdr(hdr,CLUSTERMSG_TYPE_UPDATE);
     memcpy(hdr->data.update.nodecfg.nodename,node->name,REDIS_CLUSTER_NAMELEN);
     hdr->data.update.nodecfg.configEpoch = htonu64(node->configEpoch);
@@ -2151,7 +2245,8 @@ void clusterHandleSlaveFailover(void) {
     // 检查这个从节点的数据是否较新：
     // 目前的检测办法是断线时间不能超过 node timeout 的十倍
     if (data_age >
-        server.cluster_node_timeout * REDIS_CLUSTER_SLAVE_VALIDITY_MULT)
+        (server.repl_ping_slave_period * 1000) +
+        (server.cluster_node_timeout * REDIS_CLUSTER_SLAVE_VALIDITY_MULT))
         return;
 
     /* Compute the time at which we can start an election. */
@@ -2414,7 +2509,7 @@ void clusterCron(void) {
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
         now = mstime(); /* Use an updated time at every iteration. */
-        int delay;
+        mstime_t delay;
 
         // 跳过节点本身、无地址节点、HANDSHAKE 状态的节点
         if (node->flags &
@@ -2633,14 +2728,19 @@ int clusterDelNodeSlots(clusterNode *node) {
 /* -----------------------------------------------------------------------------
  * Cluster state evaluation function
  * -------------------------------------------------------------------------- */
+
+#define REDIS_CLUSTER_MAX_REJOIN_DELAY 5000
+
 void clusterUpdateState(void) {
-    int j, initial_state = server.cluster->state;
+    int j, new_state;
     int unreachable_masters = 0;
+    static mstime_t among_minority_time;
 
     /* Start assuming the state is OK. We'll turn it into FAIL if there
      * are the right conditions. */
+
     // 先假设节点状态为 OK ，后面再检测节点是否真的下线
-    server.cluster->state = REDIS_CLUSTER_OK;
+    new_state = REDIS_CLUSTER_OK;
 
     /* Check if all the slots are covered. */
     // 检查是否所有槽都已经有某个节点在处理
@@ -2648,7 +2748,7 @@ void clusterUpdateState(void) {
         if (server.cluster->slots[j] == NULL ||
             server.cluster->slots[j]->flags & (REDIS_NODE_FAIL))
         {
-            server.cluster->state = REDIS_CLUSTER_FAIL;
+            new_state = REDIS_CLUSTER_FAIL;
             break;
         }
     }
@@ -2684,23 +2784,39 @@ void clusterUpdateState(void) {
      *
      * 如果不能连接到半数以上节点，那么将我们自己的状态设置为 FAIL
      * 因为在少于半数节点的情况下，节点是无法将一个节点判断为 FAIL 的。
-     *
-     * TODO: when this condition is entered, we should not undo it for some
-     * (small) time after the majority is reachable again, to make sure that
-     * other nodes have enough time to inform this node of a configuration change.
-     * Otherwise a client with an old routing table may write to this node
-     * and later it may turn into a slave losing the write. */
+     */
     {
         int needed_quorum = (server.cluster->size / 2) + 1;
         
-        if (unreachable_masters >= needed_quorum)
-            server.cluster->state = REDIS_CLUSTER_FAIL;
+        if (unreachable_masters >= needed_quorum) {
+            new_state = REDIS_CLUSTER_FAIL;
+            among_minority_time = mstime();
+        }
     }
 
     /* Log a state change */
-    if (initial_state != server.cluster->state)
+    if (new_state != server.cluster->state) {
+        mstime_t rejoin_delay = server.cluster_node_timeout;
+
+        /* If the instance is a master and was partitioned away with the
+         * minority, don't let it accept queries for some time after the
+         * partition heals, to make sure there is enough time to receive
+         * a configuration update. */
+        if (rejoin_delay > REDIS_CLUSTER_MAX_REJOIN_DELAY)
+            rejoin_delay = REDIS_CLUSTER_MAX_REJOIN_DELAY;
+
+        if (new_state == REDIS_CLUSTER_OK &&
+            server.cluster->myself->flags & REDIS_NODE_MASTER &&
+            mstime() - among_minority_time < rejoin_delay)
+        {
+            return;
+        }
+
+        /* Change the state and log the event. */
         redisLog(REDIS_WARNING,"Cluster state changed: %s",
-            server.cluster->state == REDIS_CLUSTER_OK ? "ok" : "fail");
+            new_state == REDIS_CLUSTER_OK ? "ok" : "fail");
+        server.cluster->state = new_state;
+    }
 }
 
 /* This function is called after the node startup in order to verify that data
@@ -2857,9 +2973,9 @@ sds clusterGenNodesDescription(int filter) {
             ci = sdscatprintf(ci,"- ");
 
         /* Latency from the POV of this node, link status */
-        ci = sdscatprintf(ci,"%ld %ld %llu %s",
-            (long) node->ping_sent,
-            (long) node->pong_received,
+        ci = sdscatprintf(ci,"%lld %lld %llu %s",
+            (long long) node->ping_sent,
+            (long long) node->pong_received,
             (unsigned long long) node->configEpoch,
             (node->link || node->flags & REDIS_NODE_MYSELF) ?
                         "connected" : "disconnected");
@@ -2926,54 +3042,21 @@ void clusterCommand(redisClient *c) {
     if (!strcasecmp(c->argv[1]->ptr,"meet") && c->argc == 4) {
         /* CLUSTER MEET <ip> <port> */
         // 将给定地址的节点添加到集群里面
-
-        clusterNode *n;
-        struct sockaddr_storage sa;
         long port;
 
-        /* Perform sanity checks on IP/port */
-        // 检查 IP 和 port 的合法性
-        if (inet_pton(AF_INET,c->argv[2]->ptr,
-            &(((struct sockaddr_in *)&sa)->sin_addr)))
-        {
-            sa.ss_family = AF_INET;
-        } else if (inet_pton(AF_INET6,c->argv[2]->ptr,
-            &(((struct sockaddr_in6 *)&sa)->sin6_addr)))
-        {
-            sa.ss_family = AF_INET6;
-        } else {
-            addReplyError(c,"Invalid IP address in MEET");
-            return;
-        }
-        if (getLongFromObjectOrReply(c, c->argv[3], &port, NULL) != REDIS_OK ||
-                    port < 0 || port > (65535-REDIS_CLUSTER_PORT_INCR))
-        {
+        // 检查 port 参数的合法性
+        if (getLongFromObjectOrReply(c, c->argv[3], &port, NULL) != REDIS_OK) {
             addReplyError(c,"Invalid TCP port specified");
             return;
         }
 
-        /* Finally add the node to the cluster with a random name, this 
-         * will get fixed in the first handshake (ping/pong). */
-        // 创建一个新节点，节点的名字是随机的，但第一次 HANDSHAKE 之后名字会被更新
-        n = createClusterNode(NULL,REDIS_NODE_HANDSHAKE|REDIS_NODE_MEET);
-
-        /* Set node->ip as the normalized string representation of the node
-         * IP address. */
-        // 为节点设置 IP 和端口号
-        if (sa.ss_family == AF_INET)
-            inet_ntop(AF_INET,
-                (void*)&(((struct sockaddr_in *)&sa)->sin_addr),
-                n->ip,REDIS_CLUSTER_IPLEN);
-        else
-            inet_ntop(AF_INET6,
-                (void*)&(((struct sockaddr_in6 *)&sa)->sin6_addr),
-                n->ip,REDIS_CLUSTER_IPLEN);
-        n->port = port;
-
-        // 将节点添加到集群当中
-        clusterAddNode(n);
-
-        addReply(c,shared.ok);
+        if (clusterStartHandshake(c->argv[2]->ptr,port) == 0 &&
+            errno == EINVAL)
+        {
+            addReplyError(c,"Invalid node address specified");
+        } else {
+            addReply(c,shared.ok);
+        }
 
     } else if (!strcasecmp(c->argv[1]->ptr,"nodes") && c->argc == 2) {
         /* CLUSTER NODES */

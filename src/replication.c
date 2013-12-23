@@ -1607,6 +1607,7 @@ void replicationSetMaster(char *ip, int port) {
 
     // 进入连接状态（重点）
     server.repl_state = REDIS_REPL_CONNECT;
+    server.master_repl_offset = 0;
 }
 
 /* Cancel replication, setting the instance as a master itself. */
@@ -1618,7 +1619,17 @@ void replicationUnsetMaster(void) {
     sdsfree(server.masterhost);
     server.masterhost = NULL;
 
-    if (server.master) freeClient(server.master);
+    if (server.master) {
+        if (listLength(server.slaves) == 0) {
+            /* If this instance is turned into a master and there are no
+             * slaves, it inherits the replication offset from the master.
+             * Under certain conditions this makes replicas comparable by
+             * replication offset to understand what is the most updated. */
+            server.master_repl_offset = server.master->reploff;
+            freeReplicationBacklog();
+        }
+        freeClient(server.master);
+    }
 
     replicationDiscardCachedMaster();
 
