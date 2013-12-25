@@ -1978,7 +1978,8 @@ void initServer() {
 
     /* Open the TCP listening socket for the user commands. */
     // 打开 TCP 监听端口，用于等待客户端的命令请求
-    if (listenToPort(server.port,server.ipfd,&server.ipfd_count) == REDIS_ERR)
+    if (server.port != 0 &&
+        listenToPort(server.port,server.ipfd,&server.ipfd_count) == REDIS_ERR)
         exit(1);
 
     /* Open the listening Unix domain socket. */
