@@ -1580,7 +1580,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     flushAppendOnlyFile(0);
 
     /* Call the Redis Cluster before sleep function. */
-    // 集群。。。TODO
+    // 在进入下个事件循环前，执行一些集群收尾工作
     if (server.cluster_enabled) clusterBeforeSleep();
 }
 
@@ -2474,30 +2474,57 @@ int processCommand(redisClient *c) {
     }
 
     /* If cluster is enabled perform the cluster redirection here.
+     *
+     * 如果开启了集群模式，那么在这里进行转向操作。
+     *
      * However we don't perform the redirection if:
+     *
+     * 不过，如果有以下情况出现，那么节点不进行转向：
+     *
      * 1) The sender of this command is our master.
-     * 2) The command has no key arguments. */
+     *    命令的发送者是本节点的主节点
+     *
+     * 2) The command has no key arguments. 
+     *    命令没有 key 参数
+     */
     if (server.cluster_enabled &&
         !(c->flags & REDIS_MASTER) &&
         !(c->cmd->getkeys_proc == NULL && c->cmd->firstkey == 0))
     {
         int hashslot;
 
+        // 集群已下线
         if (server.cluster->state != REDIS_CLUSTER_OK) {
             addReplySds(c,sdsnew("-CLUSTERDOWN The cluster is down. Use CLUSTER INFO for more information\r\n"));
             return REDIS_OK;
+
+        // 集群运作正常
         } else {
+
+            // 记录转向是 ASK 还是 MOVED
             int ask;
+
             clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,c->argc,&hashslot,&ask);
+
+            // 不能执行多键处理命令
             if (n == NULL) {
                 addReplyError(c,"Multi keys request invalid in cluster");
                 return REDIS_OK;
+
+            // 命令针对的槽和键不是本节点处理的，进行转向
             } else if (n != server.cluster->myself) {
+
+                // -<ASK or MOVED> <slot> <ip>:<port>
+                // 例如 -ASK 10086 127.0.0.1:12345
                 addReplySds(c,sdscatprintf(sdsempty(),
                     "-%s %d %s:%d\r\n", ask ? "ASK" : "MOVED",
                     hashslot,n->ip,n->port));
+
                 return REDIS_OK;
             }
+
+            // 如果执行到这里，说明键 key 所在的槽由本节点处理
+            // 或者客户端执行的是无参数命令
         }
     }
 
