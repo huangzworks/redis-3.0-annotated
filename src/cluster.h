@@ -7,9 +7,9 @@
 
 // 槽数量
 #define REDIS_CLUSTER_SLOTS 16384
-// 动作执行正常
+// 集群在线
 #define REDIS_CLUSTER_OK 0          /* Everything looks ok */
-// 表示 OK 之外的另一种 CASE （不一定是错误或者失败）
+// 集群下线
 #define REDIS_CLUSTER_FAIL 1        /* The cluster can't work */
 // 节点名字的长度
 #define REDIS_CLUSTER_NAMELEN 40    /* sha1 hex length */
@@ -27,7 +27,7 @@
  */
 // 默认节点超时时限
 #define REDIS_CLUSTER_DEFAULT_NODE_TIMEOUT 15000
-// 检验失效报告的乘法因子
+// 检验下线报告的乘法因子
 #define REDIS_CLUSTER_FAIL_REPORT_VALIDITY_MULT 2 /* Fail report validity. */
 // 撤销主节点 FAIL 状态的乘法因子
 #define REDIS_CLUSTER_FAIL_UNDO_TIME_MULT 2 /* Undo fail if master is back. */
@@ -90,14 +90,14 @@ typedef struct clusterLink {
 
 
 /* This structure represent elements of node->fail_reports. */
-// 每个 clusterNodeFailReport 结构保存了一条其他节点对目标节点的失效报告
+// 每个 clusterNodeFailReport 结构保存了一条其他节点对目标节点的下线报告
 // （认为目标节点已经下线）
 struct clusterNodeFailReport {
 
-    // 报告目标节点已经失效的节点
+    // 报告目标节点已经下线的节点
     struct clusterNode *node;  /* Node reporting the failure condition. */
 
-    // 最后一次从 node 节点收到失效报告的时间
+    // 最后一次从 node 节点收到下线报告的时间
     mstime_t time;             /* Time of the last report from this node. */
 
 } typedef clusterNodeFailReport;
@@ -159,7 +159,7 @@ struct clusterNode {
     // 连接
     clusterLink *link;          /* TCP/IP link with this node */
 
-    // 一个列表，记录了所有节点对该节点的失效报告
+    // 一个列表，记录了所有节点对该节点的下线报告
     list *fail_reports;         /* List of nodes signaling this as failing */
 
 };
@@ -180,10 +180,10 @@ typedef struct clusterState {
     // 集群状态
     int state;            /* REDIS_CLUSTER_OK, REDIS_CLUSTER_FAIL, ... */
 
-    // 判断一个节点为 FAIL 所需的投票数量（quorum）
+    // 集群中至少处理着一个槽的节点的数量。
     int size;             /* Num of master nodes with at least one slot */
 
-    // 集群节点名单（不包括 myself 节点）
+    // 集群节点名单（包括 myself 节点）
     // 字典的键为节点的名字，字典的值为 clusterNode 结构
     dict *nodes;          /* Hash table of name -> clusterNode structures */
 
@@ -310,7 +310,7 @@ typedef struct {
 
 typedef struct {
 
-    // 失效节点的名字
+    // 下线节点的名字
     char nodename[REDIS_CLUSTER_NAMELEN];
 
 } clusterMsgDataFail;

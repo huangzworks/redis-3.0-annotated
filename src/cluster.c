@@ -150,10 +150,10 @@ int clusterLoadConfig(char *filename) {
             // 这是一个从节点
             } else if (!strcasecmp(s,"slave")) {
                 n->flags |= REDIS_NODE_SLAVE;
-            // 这是一个疑似失效节点
+            // 这是一个疑似下线节点
             } else if (!strcasecmp(s,"fail?")) {
                 n->flags |= REDIS_NODE_PFAIL;
-            // 这是一个已失效节点
+            // 这是一个已下线节点
             } else if (!strcasecmp(s,"fail")) {
                 n->flags |= REDIS_NODE_FAIL;
                 n->fail_time = mstime();
@@ -331,13 +331,18 @@ void clusterInit(void) {
     if (clusterLoadConfig(server.cluster_configfile) == REDIS_ERR) {
         /* No configuration found. We will just use the random name provided
          * by the createClusterNode() function. */
+        // 未载入到配置文件，为节点创建一个随机名字
         server.cluster->myself =
             createClusterNode(NULL,REDIS_NODE_MYSELF|REDIS_NODE_MASTER);
         redisLog(REDIS_NOTICE,"No cluster configuration found, I'm %.40s",
             server.cluster->myself->name);
+
+        // 将节点添加到集群中
         clusterAddNode(server.cluster->myself);
+
         saveconf = 1;
     }
+
     // 保存 nodes.conf 文件
     if (saveconf) clusterSaveConfigOrDie(1);
 
@@ -505,30 +510,30 @@ clusterNode *createClusterNode(char *nodename, int flags) {
 
 /* This function is called every time we get a failure report from a node.
  *
- * 这个函数会在当前节点接到某个节点的失效报告时调用。
+ * 这个函数会在当前节点接到某个节点的下线报告时调用。
  *
  * The side effect is to populate the fail_reports list (or to update
  * the timestamp of an existing report).
  *
- * 函数的作用就是将失效节点的失效报告添加到 fail_reports 列表，
- * 如果这个失效节点的失效报告已经存在，
+ * 函数的作用就是将下线节点的下线报告添加到 fail_reports 列表，
+ * 如果这个下线节点的下线报告已经存在，
  * 那么更新该报告的时间戳。
  *
  * 'failing' is the node that is in failure state according to the
  * 'sender' node.
  *
- * failing 参数指向失效节点，而 sender 参数则指向报告 failing 已失效的节点。
+ * failing 参数指向下线节点，而 sender 参数则指向报告 failing 已下线的节点。
  *
  * The function returns 0 if it just updates a timestamp of an existing
  * failure report from the same sender. 1 is returned if a new failure
  * report is created. 
  *
  * 函数返回 0 表示对已存在的报告进行了更新，
- * 返回 1 则表示创建了一条新的失效报告。
+ * 返回 1 则表示创建了一条新的下线报告。
  */
 int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
 
-    // 指向保存失效报告的链表
+    // 指向保存下线报告的链表
     list *l = failing->fail_reports;
 
     listNode *ln;
@@ -537,7 +542,7 @@ int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
 
     /* If a failure report from the same sender already exists, just update
      * the timestamp. */
-    // 查找 sender 节点的失效报告是否已经存在
+    // 查找 sender 节点的下线报告是否已经存在
     listRewind(l,&li);
     while ((ln = listNext(&li)) != NULL) {
         fr = ln->value;
@@ -566,29 +571,29 @@ int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
  * older than the global node timeout, so we don't just trust the number
  * of failure reports from other nodes. 
  *
- * 移除对 node 节点的过期的失效报告，
+ * 移除对 node 节点的过期的下线报告，
  * 多长时间为过期是根据 node timeout 选项的值来决定的。
  *
  * 注意，
  * 要将一个节点标记为 FAIL 状态，
  * 当前节点将 node 标记为 PFAIL 状态的时间至少应该超过 node timeout ，
- * 所以报告 node 已失效的节点数量并不是当前节点将 node 标记为 FAIL 的唯一条件。
+ * 所以报告 node 已下线的节点数量并不是当前节点将 node 标记为 FAIL 的唯一条件。
  */
 void clusterNodeCleanupFailureReports(clusterNode *node) {
 
-    // 指向该节点的所有失效报告
+    // 指向该节点的所有下线报告
     list *l = node->fail_reports;
 
     listNode *ln;
     listIter li;
     clusterNodeFailReport *fr;
 
-    // 失效报告的最大保质期（超过这个时间的报告会被删除）
+    // 下线报告的最大保质期（超过这个时间的报告会被删除）
     mstime_t maxtime = server.cluster_node_timeout *
                      REDIS_CLUSTER_FAIL_REPORT_VALIDITY_MULT;
     mstime_t now = mstime();
 
-    // 遍历所有失效报告
+    // 遍历所有下线报告
     listRewind(l,&li);
     while ((ln = listNext(&li)) != NULL) {
         fr = ln->value;
@@ -601,27 +606,27 @@ void clusterNodeCleanupFailureReports(clusterNode *node) {
  * failing by 'sender'. This function is called when a node informs us via
  * gossip that a node is OK from its point of view (no FAIL or PFAIL flags).
  *
- * 从 node 节点的失效报告中移除 sender 对 node 的失效报告。
+ * 从 node 节点的下线报告中移除 sender 对 node 的下线报告。
  *
  * 这个函数在以下情况使用：当前节点认为 node 已下线（FAIL 或者 PFAIL），
  * 但 sender 却向当前节点发来报告，说它认为 node 节点没有下线，
- * 那么当前节点就要移除 sender 对 node 的失效报告 
- * —— 如果 sender 曾经报告过 node 失效的话。
+ * 那么当前节点就要移除 sender 对 node 的下线报告 
+ * —— 如果 sender 曾经报告过 node 下线的话。
  *
  * Note that this function is called relatively often as it gets called even
  * when there are no nodes failing, and is O(N), however when the cluster is
  * fine the failure reports list is empty so the function runs in constant
  * time.
  *
- * 即使在节点没有失效的情况下，这个函数也会被调用，并且调用的次数还比较频繁。
+ * 即使在节点没有下线的情况下，这个函数也会被调用，并且调用的次数还比较频繁。
  * 在一般情况下，这个函数的复杂度为 O(N) ，
- * 不过在不存在失效报告的情况下，这个函数的复杂度仅为常数时间。
+ * 不过在不存在下线报告的情况下，这个函数的复杂度仅为常数时间。
  *
  * The function returns 1 if the failure report was found and removed.
  * Otherwise 0 is returned. 
  *
- * 函数返回 1 表示失效报告已经被成功移除，
- * 0 表示 sender 没有发送过 node 的失效报告，删除失败。
+ * 函数返回 1 表示下线报告已经被成功移除，
+ * 0 表示 sender 没有发送过 node 的下线报告，删除失败。
  */
 int clusterNodeDelFailureReport(clusterNode *node, clusterNode *sender) {
     list *l = node->fail_reports;
@@ -630,19 +635,19 @@ int clusterNodeDelFailureReport(clusterNode *node, clusterNode *sender) {
     clusterNodeFailReport *fr;
 
     /* Search for a failure report from this sender. */
-    // 查找 sender 对 node 的失效报告
+    // 查找 sender 对 node 的下线报告
     listRewind(l,&li);
     while ((ln = listNext(&li)) != NULL) {
         fr = ln->value;
         if (fr->node == sender) break;
     }
-    // sender 没有报告过 node 失效，直接返回
+    // sender 没有报告过 node 下线，直接返回
     if (!ln) return 0; /* No failure report from this sender. */
 
     /* Remove the failure report. */
-    // 删除 sender 对 node 的失效报告
+    // 删除 sender 对 node 的下线报告
     listDelNode(l,ln);
-    // 删除对 node 的失效报告中，过期的报告
+    // 删除对 node 的下线报告中，过期的报告
     clusterNodeCleanupFailureReports(node);
 
     return 1;
@@ -657,10 +662,10 @@ int clusterNodeDelFailureReport(clusterNode *node, clusterNode *sender) {
  */
 int clusterNodeFailureReportsCount(clusterNode *node) {
 
-    // 移除过期的失效报告
+    // 移除过期的下线报告
     clusterNodeCleanupFailureReports(node);
 
-    // 统计失效报告的数量
+    // 统计下线报告的数量
     return listLength(node->fail_reports);
 }
 
@@ -748,7 +753,7 @@ int clusterAddNode(clusterNode *node) {
  * 1) Mark all the nodes handled by it as unassigned.
  *    将所有由该节点负责的槽全部设置为未分配
  * 2) Remove all the failure reports sent by this node.
- *    移除所有由这个节点发送的失效报告（failure report）
+ *    移除所有由这个节点发送的下线报告（failure report）
  * 3) Free the node, that will in turn remove it from the hash table
  *    and from the list of slaves of its master, if it is a slave node.
  *    释放这个节点，
@@ -775,7 +780,7 @@ void clusterDelNode(clusterNode *delnode) {
     }
 
     /* 2) Remove failure reports. */
-    // 移除所有由该节点发送的失效报告
+    // 移除所有由该节点发送的下线报告
     di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
@@ -1003,7 +1008,7 @@ void markNodeAsFailingIfNeeded(clusterNode *node) {
     if (server.cluster->myself->flags & REDIS_NODE_MASTER)
         failures += 1;
 
-    // 报告失效节点的数量不足节点总数的一半，不能将节点判断为 FAIL ，返回
+    // 报告下线节点的数量不足节点总数的一半，不能将节点判断为 FAIL ，返回
     if (failures < needed_quorum) return; /* No weak agreement from masters. */
 
     redisLog(REDIS_NOTICE,
@@ -1172,14 +1177,14 @@ int clusterStartHandshake(char *ip, int port) {
     /* Add the node with a random address (NULL as first argument to
      * createClusterNode()). Everything will be fixed during the
      * handskake. */
-    // 给正在 HANDSHAKE 的新节点添加一个随机地址
-    // 当 HANDSHAKE 完成，当前节点会取得 HANDSHAKE 节点的真正地址
-    // 到时会用真地址替换随机地址
+    // 对给定地址的节点设置一个随机名字
+    // 当 HANDSHAKE 完成时，当前节点会取得给定地址节点的真正名字
+    // 到时会用真名替换随机名
     n = createClusterNode(NULL,REDIS_NODE_HANDSHAKE|REDIS_NODE_MEET);
     memcpy(n->ip,norm_ip,sizeof(n->ip));
     n->port = port;
 
-    // 添加节点
+    // 将节点添加到集群当中
     clusterAddNode(n);
 
     return 1;
@@ -1187,7 +1192,7 @@ int clusterStartHandshake(char *ip, int port) {
 
 /* Process the gossip section of PING or PONG packets.
  *
- * 解释 PING 或 PONG 消息中的信息。
+ * 解释 PING 或 PONG 消息中和 gossip 协议有关的消息。
  *
  * Note that this function assumes that the packet is already sanity-checked
  * by the caller, not in the content of the gossip section, but in the
@@ -1242,7 +1247,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
             /* We already know this node.
                Handle failure reports, only when the sender is a master. */
 
-            // 如果 sender 是一个主节点，那么我们需要处理失效报告
+            // 如果 sender 是一个主节点，那么我们需要处理下线报告
             if (sender && sender->flags & REDIS_NODE_MASTER &&
                 node != server.cluster->myself)
             {
@@ -1250,7 +1255,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
                 // 节点处于 FAIL 或者 PFAIL 状态
                 if (flags & (REDIS_NODE_FAIL|REDIS_NODE_PFAIL)) {
 
-                    // 添加 sender 对 node 的失效报告
+                    // 添加 sender 对 node 的下线报告
                     if (clusterNodeAddFailureReport(node,sender)) {
                         redisLog(REDIS_VERBOSE,
                             "Node %.40s reported node %.40s as not reachable.",
@@ -1263,7 +1268,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
                 // 节点处于正常状态
                 } else {
 
-                    // 如果 sender 曾经发送过对 node 的失效报告
+                    // 如果 sender 曾经发送过对 node 的下线报告
                     // 那么清除该报告
                     if (clusterNodeDelFailureReport(node,sender)) {
                         redisLog(REDIS_VERBOSE,
@@ -1278,6 +1283,9 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
              * handshake with the (possibly) new address: this will result
              * into a node address update if the handshake will be
              * successful. */
+            // 如果节点之前处于 PFAIL 或者 FAIL 状态
+            // 并且该节点的 IP 或者端口号已经发生变化
+            // 那么可能是节点换了新地址，尝试对它进行握手
             if (node->flags & (REDIS_NODE_FAIL|REDIS_NODE_PFAIL) &&
                 (strcasecmp(node->ip,g->ip) || node->port != ntohs(g->port)))
             {
@@ -1546,7 +1554,9 @@ int clusterProcessPacket(clusterLink *link) {
     uint64_t senderCurrentEpoch = 0, senderConfigEpoch = 0;
     clusterNode *sender;
 
+    // 更新接受消息计数器
     server.cluster->stats_bus_messages_received++;
+
     redisLog(REDIS_DEBUG,"--- Processing packet of type %d, %lu bytes",
         type, (unsigned long) totlen);
 
@@ -1591,7 +1601,7 @@ int clusterProcessPacket(clusterLink *link) {
     // 查找发送者节点
     sender = clusterLookupNode(hdr->sender);
 
-    // 节点存在，并且为 handshake 节点
+    // 节点存在，并且不是 HANDSHAKE 节点
     // 那么个更新节点的配置纪元信息
     if (sender && !(sender->flags & REDIS_NODE_HANDSHAKE)) {
         /* Update our curretEpoch if we see a newer epoch in the cluster. */
@@ -1616,7 +1626,7 @@ int clusterProcessPacket(clusterLink *link) {
         /* Add this node if it is new for us and the msg type is MEET.
          *
          * 如果当前节点是第一次遇见这个节点，并且对方发来的是 MEET 信息，
-         * 那么将这个节点添加到当前节点的遇见列表里面。
+         * 那么将这个节点添加到集群的节点列表里面。
          *
          * In this stage we don't try to add the node with the right
          * flags, slaveof pointer, and so forth, as this details will be
@@ -1629,20 +1639,21 @@ int clusterProcessPacket(clusterLink *link) {
         if (!sender && type == CLUSTERMSG_TYPE_MEET) {
             clusterNode *node;
 
-            // 创建节点
+            // 创建 HANDSHAKE 状态的新节点
             node = createClusterNode(NULL,REDIS_NODE_HANDSHAKE);
 
             // 设置 IP 和端口
             nodeIp2String(node->ip,link);
             node->port = ntohs(hdr->port);
 
-            // 将该节点添加到集群
+            // 将新节点添加到集群
             clusterAddNode(node);
+
             clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
         }
 
         /* Get info from the gossip section */
-        // 分析消息内容，并取出相应的信息
+        // 分析并取出消息中的 gossip 节点信息
         clusterProcessGossipSection(hdr,link);
 
         /* Anyway reply with a PONG */
@@ -1767,7 +1778,7 @@ int clusterProcessPacket(clusterLink *link) {
         }
 
         /* Check for role switch: slave -> master or master -> slave. */
-        // 检测节点的身份消息
+        // 检测节点的身份信息，并在需要时进行更新
         if (sender) {
 
             // 发送消息的节点的 slaveof 为 REDIS_NODE_NULL_NAME
@@ -1928,7 +1939,7 @@ int clusterProcessPacket(clusterLink *link) {
         }
 
         /* Get info from the gossip section */
-        // 分析消息内容，并取出相应的信息
+        // 分析并提取出消息 gossip 协议部分的信息
         clusterProcessGossipSection(hdr,link);
 
     // 这是一条 FAIL 消息： sender 告知当前节点，某个节点已经进入 FAIL 状态。
@@ -2040,7 +2051,8 @@ int clusterProcessPacket(clusterLink *link) {
         if (n->flags & REDIS_NODE_SLAVE) clusterSetNodeAsMaster(n);
 
         /* Check the bitmap of served slots and udpate our config accordingly. */
-        // 对节点 n 的槽布局和当前节点的槽布局进行对比，并在有需要时进行更新
+        // 对节点 n 当前的槽分配情况，和当前节点对 n 所记录的槽分配情况进行对比
+        // 并在有需要时更新集群
         clusterUpdateSlotsConfigWith(n,reportedConfigEpoch,
             hdr->data.update.nodecfg.slots);
     } else {
@@ -2170,8 +2182,9 @@ void clusterReadHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
 
         /* Total length obtained? Process this packet. */
         // 检查已读入内容的长度，看是否整条信息已经被读入了
-        // 如果是的话，执行处理信息的函数
         if (rcvbuflen >= 4 && rcvbuflen == ntohl(hdr->totlen)) {
+
+            // 如果是的话，执行处理信息的函数
             if (clusterProcessPacket(link)) {
                 sdsfree(link->rcvbuf);
                 link->rcvbuf = sdsempty();
@@ -2270,7 +2283,7 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
     // 设置信息发送者
     memcpy(hdr->sender,server.cluster->myself->name,REDIS_CLUSTER_NAMELEN);
 
-    // 设置槽
+    // 设置当前节点负责的槽
     memcpy(hdr->myslots,master->slots,sizeof(hdr->myslots));
 
     // 清零 slaveof 域
@@ -2335,10 +2348,13 @@ void clusterSendPing(clusterLink *link, int type) {
     if (link->node && type == CLUSTERMSG_TYPE_PING)
         link->node->ping_sent = mstime();
 
-    // 设置信息
+    // 将当前节点的信息（比如名字、地址、端口号、负责处理的槽）记录到消息里面
     clusterBuildMessageHdr(hdr,type);
         
     /* Populate the gossip fields */
+    // 从当前节点已知的节点中随机选出两个节点
+    // 并通过这条消息捎带给目标节点，从而实现 gossip 协议
+
     // 每个节点有 freshnodes 次发送 gossip 信息的机会
     // 每次向目标节点发送 2 个被选中节点的 gossip 信息（gossipcount 计数）
     while(freshnodes > 0 && gossipcount < 3) {
@@ -2531,7 +2547,7 @@ void clusterSendFail(char *nodename) {
     unsigned char buf[sizeof(clusterMsg)];
     clusterMsg *hdr = (clusterMsg*) buf;
 
-    // 创建失效消息
+    // 创建下线消息
     clusterBuildMessageHdr(hdr,CLUSTERMSG_TYPE_FAIL);
 
     // 记录命令
@@ -2806,7 +2822,7 @@ void clusterHandleSlaveFailover(void) {
         redisLog(REDIS_WARNING,"Starting a failover election for epoch %llu.",
             (unsigned long long) server.cluster->currentEpoch);
 
-        // 向其他所有节点发送信息，看它们是否支持由本节点来对失效主节点进行故障转移
+        // 向其他所有节点发送信息，看它们是否支持由本节点来对下线主节点进行故障转移
         clusterRequestFailoverAuth();
 
         // 打开标识，表示已发送信息
@@ -2824,7 +2840,7 @@ void clusterHandleSlaveFailover(void) {
     }
 
     /* Check if we reached the quorum. */
-    // 如果当前节点获得了足够多的投票，那么对失效主节点进行故障转移
+    // 如果当前节点获得了足够多的投票，那么对下线主节点进行故障转移
     if (server.cluster->failover_auth_count >= needed_quorum) {
 
         // 旧主节点
@@ -2913,12 +2929,12 @@ void clusterCron(void) {
     if (handshake_timeout < 1000) handshake_timeout = 1000;
 
     /* Check if we have disconnected nodes and re-establish the connection. */
-    // 与断线（或者未创建连接）的节点发送信息
+    // 向集群中的所有断线或者未连接节点发送消息
     di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
 
-        // 跳过自身以及没有地址的节点
+        // 跳过当前节点以及没有地址的节点
         if (node->flags & (REDIS_NODE_MYSELF|REDIS_NODE_NOADDR)) continue;
 
         /* A Node in HANDSHAKE state has a limited lifespan equal to the
@@ -2952,7 +2968,7 @@ void clusterCron(void) {
              * If the node is flagged as MEET, we send a MEET message instead
              * of a PING one, to force the receiver to add us in its node
              * table. */
-            // 向新连接的节点发送 PING 命令，防止节点被识进入失效
+            // 向新连接的节点发送 PING 命令，防止节点被识进入下线
             // 如果节点被标记为 MEET ，那么发送 MEET 命令，否则发送 PING 命令
             old_ping_sent = node->ping_sent;
             clusterSendPing(link, node->flags & REDIS_NODE_MEET ?
@@ -3616,7 +3632,8 @@ void clusterCommand(redisClient *c) {
 
     if (!strcasecmp(c->argv[1]->ptr,"meet") && c->argc == 4) {
         /* CLUSTER MEET <ip> <port> */
-        // 将给定地址的节点添加到集群里面
+        // 将给定地址的节点添加到当前节点所处的集群里面
+
         long port;
 
         // 检查 port 参数的合法性
@@ -3625,11 +3642,14 @@ void clusterCommand(redisClient *c) {
             return;
         }
 
+        // 尝试与给定地址的节点进行连接
         if (clusterStartHandshake(c->argv[2]->ptr,port) == 0 &&
             errno == EINVAL)
         {
+            // 连接失败
             addReplyError(c,"Invalid node address specified");
         } else {
+            // 连接成功
             addReply(c,shared.ok);
         }
 
@@ -3852,7 +3872,7 @@ void clusterCommand(redisClient *c) {
         int slots_assigned = 0, slots_ok = 0, slots_pfail = 0, slots_fail = 0;
         int j;
 
-        // 统计集群中的已指派节点、已失效节点、疑似失效节点和正常节点的数量
+        // 统计集群中的已指派节点、已下线节点、疑似下线节点和正常节点的数量
         for (j = 0; j < REDIS_CLUSTER_SLOTS; j++) {
             clusterNode *n = server.cluster->slots[j];
 
@@ -3864,10 +3884,10 @@ void clusterCommand(redisClient *c) {
 
             // 统计各个不同状态下的节点的数量
             if (n->flags & REDIS_NODE_FAIL) {
-                // 已失效节点
+                // 已下线节点
                 slots_fail++;
             } else if (n->flags & REDIS_NODE_PFAIL) {
-                // 疑似失效节点
+                // 疑似下线节点
                 slots_pfail++;
             } else {
                 // 正常节点
