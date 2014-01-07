@@ -1471,16 +1471,18 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
              * 1) The slot was unassigned.
              * 2) The new node claims it with a greater configEpoch. */
 
-            // 当前节点的槽 j 已经是 sender 处理的了，跳过
+            // 槽 j 已经指派给 sender 了，略过
             if (server.cluster->slots[j] == sender) continue;
 
-            // 如果当前节点的槽 j 未指派
-            // 或者当前节点的槽的配置纪元比 sender 的配置纪元要低（槽的布局可能已经发生了变化）
+            // 槽 j 未指派
+            // 或者当前槽 j 指派的节点的配置纪元比 sender 的配置纪元要低（可能发生了自动故障转移）
+            // 那么更新槽 j 的指派节点
             if (server.cluster->slots[j] == NULL ||
                 server.cluster->slots[j]->configEpoch <
                 senderConfigEpoch)
             {
-                // 当前节点（或者当前节点的主节点）是否有槽被指派给了 sender ？
+                // 负责槽 j 的原节点是当前节点的主节点？
+                // 如果是的话，说明故障转移发生了，将当前节点的复制对象设置为新的主节点
                 if (server.cluster->slots[j] == curmaster)
                     newmaster = sender;
 
@@ -1546,12 +1548,20 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
  */
 int clusterProcessPacket(clusterLink *link) {
 
+    // 指向消息头
     clusterMsg *hdr = (clusterMsg*) link->rcvbuf;
 
+    // 消息的长度
     uint32_t totlen = ntohl(hdr->totlen);
+
+    // 消息的类型
     uint16_t type = ntohs(hdr->type);
+
+    // 消息发送者的标识
     uint16_t flags = ntohs(hdr->flags);
+
     uint64_t senderCurrentEpoch = 0, senderConfigEpoch = 0;
+
     clusterNode *sender;
 
     // 更新接受消息计数器
@@ -1877,8 +1887,8 @@ int clusterProcessPacket(clusterLink *link) {
         /* 1) If the sender of the message is a master, and we detected that the
          *    set of slots it claims changed, scan the slots to see if we need
          *    to update our configuration. */
-        // 如果 sender 是主节点，并且槽配置出现了变动
-        // 检查 sender 槽的信息，看看当前节点的槽信息是否需要更新
+        // 如果 sender 是主节点，并且 sender 的槽布局出现了变动
+        // 那么检查当前节点对 sender 的槽布局设置，看是否需要进行更新
         if (sender && sender->flags & REDIS_NODE_MASTER && dirty_slots) {
             clusterUpdateSlotsConfigWith(sender,senderConfigEpoch,hdr->myslots);
         }
@@ -1895,15 +1905,35 @@ int clusterProcessPacket(clusterLink *link) {
          * master may be the last one to claim a given set of hash slots, but with
          * a configuration that other instances know to be deprecated. Example:
          *
+         * 这种情况可能会出现在网络分裂中，
+         * 一个重新上线的主节点可能会带有已经过时的槽布局。
+         *
+         * 比如说：
+         *
          * A and B are master and slave for slots 1,2,3.
+         * A 负责槽 1 、 2 、 3 ，而 B 是 A 的从节点。
+         *
          * A is partitioned away, B gets promoted.
+         * A 从网络中分裂出去，B 被提升为主节点。
+         *
          * B is partitioned away, and A returns available.
+         * B 从网络中分裂出去， A 重新上线（但是它所使用的槽布局是旧的）。
          *
          * Usually B would PING A publishing its set of served slots and its
          * configEpoch, but because of the partition B can't inform A of the new
          * configuration, so other nodes that have an updated table must do it.
+         *
+         * 在正常情况下， B 应该向 A 发送 PING 消息，告知 A ，自己（B）已经接替了
+         * 槽 1、 2、 3 ，并且带有更更的配置纪元，但因为网络分裂的缘故，
+         * 节点 B 没办法通知节点 A ，
+         * 所以通知节点 A 它带有的槽布局已经更新的工作就交给其他知道 B 带有更高配置纪元的节点来做。
+         *
          * In this way A will stop to act as a master (or can try to failover if
-         * there are the conditions to win the election). */
+         * there are the conditions to win the election). 
+         *
+         * 当 A 接到其他节点关于节点 B 的消息时，
+         * 节点 A 就会停止自己的主节点工作，又或者重新进行故障转移。
+         */
         if (sender && dirty_slots) {
             int j;
 
@@ -1917,7 +1947,7 @@ int clusterProcessPacket(clusterLink *link) {
                     if (server.cluster->slots[j] == sender ||
                         server.cluster->slots[j] == NULL) continue;
 
-                    // 当前节点认为槽 j 的配置纪元比 sender 的配置纪元要大
+                    // 当前节点槽 j 的配置纪元比 sender 的配置纪元要大
                     if (server.cluster->slots[j]->configEpoch >
                         senderConfigEpoch)
                     {
@@ -2032,7 +2062,7 @@ int clusterProcessPacket(clusterLink *link) {
             clusterDoBeforeSleep(CLUSTER_TODO_HANDLE_FAILOVER);
         }
 
-    // 这是一条更新消息： sender 告知当前节点，需要更新自己的槽布局
+    // 这是一条更新消息： sender 告知当前节点，当前节点需要更新某个节点的槽布局
     } else if (type == CLUSTERMSG_TYPE_UPDATE) {
         clusterNode *n; /* The node the update is about. */
 
@@ -2044,15 +2074,19 @@ int clusterProcessPacket(clusterLink *link) {
         // 获取需要更新的节点
         n = clusterLookupNode(hdr->data.update.nodecfg.nodename);
         if (!n) return 1;   /* We don't know the reported node. */
+
+        // 消息的纪元并不大于节点 n 所处的配置纪元
+        // 无须更新
         if (n->configEpoch >= reportedConfigEpoch) return 1; /* Nothing new. */
 
         /* If in our current config the node is a slave, set it as a master. */
-        // 如果节点 n 为从节点，那么将它设置为主节点
+        // 如果节点 n 为从节点，但它的槽配置更新了
+        // 那么说明这个节点已经变为主节点，将它设置为主节点
         if (n->flags & REDIS_NODE_SLAVE) clusterSetNodeAsMaster(n);
 
         /* Check the bitmap of served slots and udpate our config accordingly. */
-        // 对节点 n 当前的槽分配情况，和当前节点对 n 所记录的槽分配情况进行对比
-        // 并在有需要时更新集群
+        // 将消息中对 n 的槽布局与当前节点对 n 的槽布局进行对比
+        // 在有需要时更新当前节点对 n 的槽布局的认识
         clusterUpdateSlotsConfigWith(n,reportedConfigEpoch,
             hdr->data.update.nodecfg.slots);
     } else {
@@ -3826,7 +3860,7 @@ void clusterCommand(redisClient *c) {
 
             /* If this hash slot was served by 'myself' before to switch
              * make sure there are no longer local keys for this hash slot. */
-            // 如果这个槽由当前节点负责处理，那么必须保证槽里面没有键存在
+            // 如果这个槽之前由当前节点负责处理，那么必须保证槽里面没有键存在
             if (server.cluster->slots[slot] == server.cluster->myself &&
                 n != server.cluster->myself)
             {
@@ -4074,6 +4108,15 @@ void createDumpPayload(rio *payload, robj *o) {
 
     /* Serialize the object in a RDB-like format. It consist of an object type
      * byte followed by the serialized object. This is understood by RESTORE. */
+    // 将对象序列化为一个 RDB 格式对象
+    // 序列化对象以对象类型为首，后跟序列化后的对象
+    // 如图
+    //
+    // |<-- RDB payload  -->|
+    //      序列化数据
+    // +-------------+------+
+    // | 1 byte type | obj  |
+    // +-------------+------+
     rioInitWithBuffer(payload,sdsempty());
     redisAssert(rdbSaveObjectType(payload,o));
     redisAssert(rdbSaveObject(payload,o));
@@ -4086,15 +4129,25 @@ void createDumpPayload(rio *payload, robj *o) {
      */
 
     /* RDB version */
+    // 写入 RDB 版本
     buf[0] = REDIS_RDB_VERSION & 0xff;
     buf[1] = (REDIS_RDB_VERSION >> 8) & 0xff;
     payload->io.buffer.ptr = sdscatlen(payload->io.buffer.ptr,buf,2);
 
     /* CRC64 */
+    // 写入 CRC 校验和
     crc = crc64(0,(unsigned char*)payload->io.buffer.ptr,
                 sdslen(payload->io.buffer.ptr));
     memrev64ifbe(&crc);
     payload->io.buffer.ptr = sdscatlen(payload->io.buffer.ptr,&crc,8);
+
+    // 整个数据的结构:
+    //
+    // | <--- 序列化数据 -->|
+    // +-------------+------+---------------------+---------------+
+    // | 1 byte type | obj  | 2 bytes RDB version | 8 bytes CRC64 |
+    // +-------------+------+---------------------+---------------+
+
 }
 
 /* Verify that the RDB version of the dump payload matches the one of this Redis
@@ -4114,14 +4167,21 @@ int verifyDumpPayload(unsigned char *p, size_t len) {
     uint64_t crc;
 
     /* At least 2 bytes of RDB version and 8 of CRC64 should be present. */
+    // 因为序列化数据至少包含 2 个字节的 RDB 版本
+    // 以及 8 个字节的 CRC64 校验和
+    // 所以序列化数据不可能少于 10 个字节
     if (len < 10) return REDIS_ERR;
+
+    // 指向数据的最后 10 个字节
     footer = p+(len-10);
 
     /* Verify RDB version */
+    // 检查序列化数据的版本号，看是否和当前实例使用的版本号一致
     rdbver = (footer[1] << 8) | footer[0];
     if (rdbver != REDIS_RDB_VERSION) return REDIS_ERR;
 
     /* Verify CRC64 */
+    // 检查数据的 CRC64 校验和是否正确
     crc = crc64(0,p,len-8);
     memrev64ifbe(&crc);
     return (memcmp(&crc,footer+2,8) == 0) ? REDIS_OK : REDIS_ERR;
@@ -4135,14 +4195,14 @@ void dumpCommand(redisClient *c) {
     rio payload;
 
     /* Check if the key is here. */
-    // 取出给定键
+    // 取出给定键的值
     if ((o = lookupKeyRead(c->db,c->argv[1])) == NULL) {
         addReply(c,shared.nullbulk);
         return;
     }
 
     /* Create the DUMP encoded representation. */
-    // 创建给定键值对的一个编码表示
+    // 创建给定值的一个 DUMP 编码表示
     createDumpPayload(&payload,o);
 
     /* Transfer to the client */
@@ -4181,7 +4241,7 @@ void restoreCommand(redisClient *c) {
     }
 
     /* Check if the TTL value makes sense */
-    // 取出 TTL 值
+    // 取出（可能有的） TTL 值
     if (getLongFromObjectOrReply(c,c->argv[2],&ttl,NULL) != REDIS_OK) {
         return;
     } else if (ttl < 0) {
@@ -4196,7 +4256,7 @@ void restoreCommand(redisClient *c) {
         return;
     }
 
-    // 读取 DUMP 数据，并分析出键值对的类型和值
+    // 读取 DUMP 数据，并反序列化出键值对的类型和值
     rioInitWithBuffer(&payload,c->argv[3]->ptr);
     if (((type = rdbLoadObjectType(&payload)) == -1) ||
         ((obj = rdbLoadObject(type,&payload)) == NULL))
@@ -4212,7 +4272,8 @@ void restoreCommand(redisClient *c) {
     /* Create the key and set the TTL if any */
     // 将键值对添加到数据库
     dbAdd(c->db,c->argv[1],obj);
-    // 如果有 TTL 的话，设置 TTL
+
+    // 如果键带有 TTL 的话，设置键的 TTL
     if (ttl) setExpire(c->db,c->argv[1],mstime()+ttl);
 
     signalModifiedKey(c->db,c->argv[1]);
@@ -4422,7 +4483,7 @@ try_again:
     /* Check if the key is here. If not we reply with success as there is
      * nothing to migrate (for instance the key expired in the meantime), but
      * we include such information in the reply string. */
-    // 取出指定的键
+    // 取出键的值对象
     if ((o = lookupKeyRead(c->db,c->argv[3])) == NULL) {
         addReplySds(c,sdsnew("+NOKEY\r\n"));
         return;
@@ -4440,7 +4501,7 @@ try_again:
     redisAssertWithInfo(c,NULL,rioWriteBulkString(&cmd,"SELECT",6));
     redisAssertWithInfo(c,NULL,rioWriteBulkLongLong(&cmd,dbid));
 
-    // 取出键的过期时间
+    // 取出键的过期时间戳
     expireat = getExpire(c->db,c->argv[3]);
     if (expireat != -1) {
         ttl = expireat-mstime();
@@ -4463,8 +4524,9 @@ try_again:
 
     /* Emit the payload argument, that is the serialized object using
      * the DUMP format. */
-    // 写入值的类型，以及值本身
+    // 将值对象进行序列化
     createDumpPayload(&payload,o);
+    // 写入序列化对象
     redisAssertWithInfo(c,NULL,rioWriteBulkString(&cmd,payload.io.buffer.ptr,
                                 sdslen(payload.io.buffer.ptr)));
     sdsfree(payload.io.buffer.ptr);
@@ -4473,6 +4535,7 @@ try_again:
      * as a MIGRATE option. */
     // 是否设置了 REPLACE 命令？
     if (replace)
+        // 写入 REPLACE 参数
         redisAssertWithInfo(c,NULL,rioWriteBulkString(&cmd,"REPLACE",7));
 
     /* Transfer the query to the other node in 64K chunks. */
@@ -4703,6 +4766,8 @@ clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **arg
         // 在本节点中查找键 key
         if (lookupKeyRead(&server.db[0],firstkey) == NULL) {
 
+            // 在本节点没找到键 key
+
             // 进行 ASK 临时转向
             if (ask) *ask = 1;
 
@@ -4715,8 +4780,10 @@ clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **arg
      * another instance, so we'll accept the query even if in the table
      * it is assigned to a different node, but only if the client
      * issued an ASKING command before. */
-    // 如果当前客户端正在从另一个节点中导入槽 slot
-    // 并且客户端发送来了 ASK 命令，那么将槽 slot 的负责节点设为当前节点
+    // 如果当前客户端正在从另一个节点中导入槽 slot ，并且
+    // 1）在接到这个命令之前，客户端先发送了一个 ASKING 命令
+    // 2）这个命令是一个带有 REDIS_CMD_ASKING 标识的命令
+    // 那么将这个命令的执行者设置为当前节点
     if (server.cluster->importing_slots_from[slot] != NULL &&
         (c->flags & REDIS_ASKING || cmd->flags & REDIS_CMD_ASKING)) {
         return server.cluster->myself;

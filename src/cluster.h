@@ -197,7 +197,7 @@ typedef struct clusterState {
     // migrating_slots_to[i] = clusterNode_A 表示槽 i 要从本节点迁移至节点 A
     clusterNode *migrating_slots_to[REDIS_CLUSTER_SLOTS];
 
-    // 记录要从目标节点迁移到本节点的槽，以及进行迁移的目标节点
+    // 记录要从源节点迁移到本节点的槽，以及进行迁移的源节点
     // importing_slots_from[i] = NULL 表示槽 i 未进行导入
     // importing_slots_from[i] = clusterNode_A 表示正从节点 A 中导入槽 i
     clusterNode *importing_slots_from[REDIS_CLUSTER_SLOTS];
@@ -324,8 +324,8 @@ typedef struct {
     uint32_t message_len;
 
     // 消息内容，格式为 频道名+消息
-    // bulk_data[0:channel_len] 为频道名
-    // bulk_data[channel_len:] 为消息
+    // bulk_data[0:channel_len-1] 为频道名
+    // bulk_data[channel_len:channel_len+message_len-1] 为消息
     unsigned char bulk_data[8]; /* defined as 8 just for alignment concerns. */
 
 } clusterMsgDataPublish;
@@ -344,6 +344,7 @@ typedef struct {
 } clusterMsgDataUpdate;
 
 union clusterMsgData {
+
     /* PING, MEET and PONG */
     struct {
         /* Array of N clusterMsgDataGossip structures */
@@ -364,52 +365,54 @@ union clusterMsgData {
     struct {
         clusterMsgDataUpdate nodecfg;
     } update;
+
 };
 
-// 用来表示集群信息的结构
+// 用来表示集群消息的结构（消息头，header）
 typedef struct {
 
-    // 信息的长度
+    // 整个消息的长度（包括这个消息头）
     uint32_t totlen;    /* Total length of this message */
 
-    // 信息的类型
+    // 消息的类型
     uint16_t type;      /* Message type */
 
-    // 只被一部分信息使用
+    // 消息包含的 Gossip 协议信息数量，只被 Gossip 消息使用
     uint16_t count;     /* Only used for some kind of messages. */
 
-    // 发送此信息的节点的配置纪元
+    // 消息发送者的配置纪元
     uint64_t currentEpoch;  /* The epoch accordingly to the sending node. */
 
-    // 如果发送信息的节点是一个主节点，那么这里记录它的配置纪元
-    // 如果发送信息的节点是一个从节点，那么这里记录的是它的主节点的配置纪元
+    // 如果消息发送者是一个主节点，那么这里记录的是消息发送者的配置纪元
+    // 如果消息发送者是一个从节点，那么这里记录的是消息发送者的主节点的配置纪元
     uint64_t configEpoch;   /* The config epoch if it's a master, or the last epoch
                                advertised by its master if it is a slave. */
 
-    // 发送信息的节点的名字
+    // 消息发送者的名字
     char sender[REDIS_CLUSTER_NAMELEN]; /* Name of the sender node */
 
-    // 槽布局
+    // 消息发送者正在负责的槽
     unsigned char myslots[REDIS_CLUSTER_SLOTS/8];
 
-    // 当前节点正在复制的主节点
-    // 如果当前节点为主节点，那么它为 REDIS_NODE_NULL_NAME
+    // 如果消息发送者是从节点，那么这里记录的是发送者正在复制的主节点的名字
+    // 如果消息发送者是主节点，那么这里为 REDIS_NODE_NULL_NAME 
+    // （一个 40 字节长，值全为 0 的字节数组）
     char slaveof[REDIS_CLUSTER_NAMELEN];
 
     char notused1[32];  /* 32 bytes reserved for future usage. */
 
-    // 端口
+    // 消息发送者的端口
     uint16_t port;      /* Sender TCP base port */
 
-    // 节点标识
+    // 消息发送者的标识
     uint16_t flags;     /* Sender node flags */
 
-    // 发送信息节点所处的集群状态
+    // 消息发送者所处集群的状态
     unsigned char state; /* Cluster state from the POV of the sender */
 
     unsigned char notused2[3]; /* Reserved for future use. For alignment. */
 
-    // 信息的内容
+    // 消息的正文（或者说，内容）
     union clusterMsgData data;
 
 } clusterMsg;
