@@ -178,7 +178,7 @@ typedef struct sentinelAddr {
 // （被监视的实例可以是主服务器、从服务器、或者其他 Sentinel ）
 typedef struct sentinelRedisInstance {
     
-    // 实例的类型，以及该实例的当前状态
+    // 标识值，记录了实例的类型，以及该实例的当前状态
     int flags;      /* See SRI_... defines */
     
     // 实例的名字
@@ -190,7 +190,7 @@ typedef struct sentinelRedisInstance {
     // 实例的运行 ID
     char *runid;    /* run ID of this instance. */
 
-    // 配置纪元
+    // 配置纪元，用于实现故障转移
     uint64_t config_epoch;  /* Configuration epoch. */
 
     // 实例的地址
@@ -271,7 +271,9 @@ typedef struct sentinelRedisInstance {
     // 其他同样监控这个主服务器的所有 sentinel
     dict *sentinels;    /* Other sentinels monitoring the same master. */
 
-    // 这个主服务器的所有从服务器
+    // 如果这个实例代表的是一个主服务器
+    // 那么这个字典保存着主服务器属下的从服务器
+    // 字典的键是从服务器的名字，字典的值是从服务器对应的 sentinelRedisInstance 结构
     dict *slaves;       /* Slaves for this master instance. */
 
     // SENTINEL monitor <master-name> <IP> <port> <quorum> 选项中的 quorum 参数

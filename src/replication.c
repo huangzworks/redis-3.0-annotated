@@ -213,6 +213,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     redisAssert(!(listLength(slaves) != 0 && server.repl_backlog == NULL));
 
     /* Send SELECT command to every slave if needed. */
+    // 如果有需要的话，发送 SELECT 命令，指定数据库
     if (server.slaveseldb != dictid) {
         robj *selectcmd;
 
@@ -230,9 +231,11 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         }
 
         /* Add the SELECT command into the backlog. */
+        // 将 SELECT 命令添加到 backlog
         if (server.repl_backlog) feedReplicationBacklogWithObject(selectcmd);
 
         /* Send it to slaves. */
+        // 发送给所有从服务器
         listRewind(slaves,&li);
         while((ln = listNext(&li))) {
             redisClient *slave = ln->value;
@@ -242,8 +245,11 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         if (dictid < 0 || dictid >= REDIS_SHARED_SELECT_CMDS)
             decrRefCount(selectcmd);
     }
+
     server.slaveseldb = dictid;
+
     /* Write the command to the replication backlog if any. */
+    // 将命令写入到backlog
     if (server.repl_backlog) {
         char aux[REDIS_LONGSTR_SIZE+3];
 
@@ -516,7 +522,7 @@ void syncCommand(redisClient *c) {
 
     /* Refuse SYNC requests if we are a slave but the link with our master
      * is not ok... */
-    // 如果这是一个从服务器，但于主服务器的连接仍未就绪，那么拒绝 SYNC
+    // 如果这是一个从服务器，但与主服务器的连接仍未就绪，那么拒绝 SYNC
     if (server.masterhost && server.repl_state != REDIS_REPL_CONNECTED) {
         addReplyError(c,"Can't SYNC while not connected with my master");
         return;

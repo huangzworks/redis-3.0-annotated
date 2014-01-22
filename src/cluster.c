@@ -1192,7 +1192,7 @@ int clusterStartHandshake(char *ip, int port) {
 
 /* Process the gossip section of PING or PONG packets.
  *
- * 解释 PING 或 PONG 消息中和 gossip 协议有关的消息。
+ * 解释 MEET 、 PING 或 PONG 消息中和 gossip 协议有关的信息。
  *
  * Note that this function assumes that the packet is already sanity-checked
  * by the caller, not in the content of the gossip section, but in the
@@ -2359,7 +2359,7 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
 
 /* Send a PING or PONG packet to the specified node, making sure to add enough
  * gossip informations. */
-// 向指定节点发送一个 PING 或者 PONG 信息
+// 向指定节点发送一条 MEET 、 PING 或者 PONG 消息
 void clusterSendPing(clusterLink *link, int type) {
     unsigned char buf[sizeof(clusterMsg)];
     clusterMsg *hdr = (clusterMsg*) buf;

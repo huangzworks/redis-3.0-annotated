@@ -53,10 +53,10 @@ typedef struct clusterLink {
     // TCP 套接字描述符
     int fd;                     /* TCP socket file descriptor */
 
-    // 输出缓冲区
+    // 输出缓冲区，保存着等待发送给其他节点的消息（message）。
     sds sndbuf;                 /* Packet send buffer */
 
-    // 输入缓冲区
+    // 输入缓冲区，保存着从其他节点接收到的消息。
     sds rcvbuf;                 /* Packet reception buffer */
 
     // 与这个连接相关联的节点，如果没有的话就为 NULL
@@ -98,6 +98,7 @@ struct clusterNodeFailReport {
     struct clusterNode *node;  /* Node reporting the failure condition. */
 
     // 最后一次从 node 节点收到下线报告的时间
+    // 程序使用这个时间戳来检查下线报告是否过期
     mstime_t time;             /* Time of the last report from this node. */
 
 } typedef clusterNodeFailReport;
@@ -109,13 +110,16 @@ struct clusterNode {
     // 创建节点的时间
     mstime_t ctime; /* Node object creation time. */
 
-    // 节点的名字
+    // 节点的名字，由 40 个十六进制字符组成
+    // 例如 68eef66df23420a5862208ef5b1a7005b806f2ff
     char name[REDIS_CLUSTER_NAMELEN]; /* Node name, hex string, sha1-size */
 
     // 节点标识
+    // 使用各种不同的标识值记录节点的角色（比如主节点或者从节点），
+    // 以及节点目前所处的状态（比如在线或者下线）。
     int flags;      /* REDIS_NODE_... */
 
-    // 节点当前的配置纪元
+    // 节点当前的配置纪元，用于实现故障转移
     uint64_t configEpoch; /* Last configEpoch observed for this node */
 
     // 由这个节点负责处理的槽
@@ -150,16 +154,16 @@ struct clusterNode {
     // 最后一次给某个从节点投票的时间
     mstime_t voted_time;      /* Last time we voted for a slave of this master */
 
-    // ip 地址
+    // 节点的 IP 地址
     char ip[REDIS_IP_STR_LEN];  /* Latest known IP address of this node */
 
-    // 端口号
+    // 节点的端口号
     int port;                   /* Latest known port of this node */
 
-    // 连接
+    // 保存连接节点所需的有关信息
     clusterLink *link;          /* TCP/IP link with this node */
 
-    // 一个列表，记录了所有节点对该节点的下线报告
+    // 一个链表，记录了所有其他节点对该节点的下线报告
     list *fail_reports;         /* List of nodes signaling this as failing */
 
 };
@@ -174,10 +178,10 @@ typedef struct clusterState {
     // 指向当前节点的指针
     clusterNode *myself;  /* This node */
 
-    // 集群当前的配置纪元
+    // 集群当前的配置纪元，用于实现故障转移
     uint64_t currentEpoch;
 
-    // 集群状态
+    // 集群当前的状态：是在线还是下线
     int state;            /* REDIS_CLUSTER_OK, REDIS_CLUSTER_FAIL, ... */
 
     // 集群中至少处理着一个槽的节点的数量。
@@ -289,16 +293,16 @@ typedef struct {
     // 当 MEET 信息发送并得到回复之后，集群就会为节点设置正式的名字
     char nodename[REDIS_CLUSTER_NAMELEN];
 
-    // 最后一次向该节点发送 PING 命令的时间戳
+    // 最后一次向该节点发送 PING 消息的时间戳
     uint32_t ping_sent;
 
-    // 最后一次从该节点接收到 PING 命令回复的时间戳
+    // 最后一次从该节点接收到 PONG 消息的时间戳
     uint32_t pong_received;
 
-    // 节点的 IP
+    // 节点的 IP 地址
     char ip[16];    /* IP address last time it was seen */
 
-    // 节点的端口
+    // 节点的端口号
     uint16_t port;  /* port last time it was seen */
 
     // 节点的标识值
@@ -348,6 +352,7 @@ union clusterMsgData {
     /* PING, MEET and PONG */
     struct {
         /* Array of N clusterMsgDataGossip structures */
+        // 每条消息都包含两个 clusterMsgDataGossip 结构
         clusterMsgDataGossip gossip[1];
     } ping;
 
@@ -371,40 +376,41 @@ union clusterMsgData {
 // 用来表示集群消息的结构（消息头，header）
 typedef struct {
 
-    // 整个消息的长度（包括这个消息头）
+    // 消息的长度（包括这个消息头的长度和消息正文的长度）
     uint32_t totlen;    /* Total length of this message */
 
     // 消息的类型
     uint16_t type;      /* Message type */
 
-    // 消息包含的 Gossip 协议信息数量，只被 Gossip 消息使用
+    // 消息正文包含的节点信息数量
+    // 只在发送 MEET 、 PING 和 PONG 这三种 Gossip 协议消息时使用
     uint16_t count;     /* Only used for some kind of messages. */
 
     // 消息发送者的配置纪元
     uint64_t currentEpoch;  /* The epoch accordingly to the sending node. */
 
     // 如果消息发送者是一个主节点，那么这里记录的是消息发送者的配置纪元
-    // 如果消息发送者是一个从节点，那么这里记录的是消息发送者的主节点的配置纪元
+    // 如果消息发送者是一个从节点，那么这里记录的是消息发送者正在复制的主节点的配置纪元
     uint64_t configEpoch;   /* The config epoch if it's a master, or the last epoch
                                advertised by its master if it is a slave. */
 
-    // 消息发送者的名字
+    // 消息发送者的名字（ID）
     char sender[REDIS_CLUSTER_NAMELEN]; /* Name of the sender node */
 
-    // 消息发送者正在负责的槽
+    // 消息发送者目前的槽指派信息
     unsigned char myslots[REDIS_CLUSTER_SLOTS/8];
 
-    // 如果消息发送者是从节点，那么这里记录的是发送者正在复制的主节点的名字
-    // 如果消息发送者是主节点，那么这里为 REDIS_NODE_NULL_NAME 
+    // 如果消息发送者是一个从节点，那么这里记录的是消息发送者正在复制的主节点的名字
+    // 如果消息发送者是一个主节点，那么这里记录的是 REDIS_NODE_NULL_NAME
     // （一个 40 字节长，值全为 0 的字节数组）
     char slaveof[REDIS_CLUSTER_NAMELEN];
 
     char notused1[32];  /* 32 bytes reserved for future usage. */
 
-    // 消息发送者的端口
+    // 消息发送者的端口号
     uint16_t port;      /* Sender TCP base port */
 
-    // 消息发送者的标识
+    // 消息发送者的标识值
     uint16_t flags;     /* Sender node flags */
 
     // 消息发送者所处集群的状态
