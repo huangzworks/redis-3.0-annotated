@@ -177,7 +177,7 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
 }
 
 /* Write the buffer (possibly composed of multiple blocks) into the specified
- * fd. If no short write or any other error happens -1 is returned,
+ * fd. If a short write or any other error happens -1 is returned,
  * otherwise the number of bytes written is returned. 
  *
  * 将重写缓存中的所有内容（可能由多个块组成）写入到给定 fd 中。

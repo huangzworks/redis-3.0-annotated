@@ -81,7 +81,7 @@
 #define REDIS_SHARED_BULKHDR_LEN 32
 #define REDIS_MAX_LOGMSG_LEN    1024 /* Default maximum length of syslog messages */
 #define REDIS_AOF_REWRITE_PERC  100
-#define REDIS_AOF_REWRITE_MIN_SIZE (1024*1024)
+#define REDIS_AOF_REWRITE_MIN_SIZE (64*1024*1024)
 #define REDIS_AOF_REWRITE_ITEMS_PER_CMD 64
 #define REDIS_SLOWLOG_LOG_SLOWER_THAN 10000
 #define REDIS_SLOWLOG_MAX_LEN 128
@@ -233,7 +233,8 @@
 #define REDIS_MASTER_FORCE_REPLY (1<<13)  /* Queue replies even if is master */
 #define REDIS_FORCE_AOF (1<<14)   /* Force AOF propagation of current cmd. */
 #define REDIS_FORCE_REPL (1<<15)  /* Force replication of current cmd. */
-#define REDIS_PRE_PSYNC_SLAVE (1<<16) /* Slave don't understand PSYNC. */
+#define REDIS_PRE_PSYNC (1<<16)   /* Instance don't understand PSYNC. */
+#define REDIS_READONLY (1<<17)    /* Cluster client is in read-only state. */
 
 /* Client block type (btype field in client structure)
  * if REDIS_BLOCKED flag is set. */
@@ -1960,6 +1961,8 @@ void clusterCommand(redisClient *c);
 void restoreCommand(redisClient *c);
 void migrateCommand(redisClient *c);
 void askingCommand(redisClient *c);
+void readonlyCommand(redisClient *c);
+void readwriteCommand(redisClient *c);
 void dumpCommand(redisClient *c);
 void objectCommand(redisClient *c);
 void clientCommand(redisClient *c);

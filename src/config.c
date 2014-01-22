@@ -82,6 +82,7 @@ void resetServerSaveParams() {
 void loadServerConfigFromString(char *config) {
     char *err = NULL;
     int linenum = 0, totlines, i;
+    int slaveof_linenum = 0;
     sds *lines;
 
     lines = sdssplitlen(config,strlen(config),"\n",1,&totlines);
@@ -251,6 +252,7 @@ void loadServerConfigFromString(char *config) {
                 goto loaderr;
             }
         } else if (!strcasecmp(argv[0],"slaveof") && argc == 3) {
+            slaveof_linenum = linenum;
             server.masterhost = sdsnew(argv[1]);
             server.masterport = atoi(argv[2]);
             server.repl_state = REDIS_REPL_CONNECT;
@@ -500,13 +502,16 @@ void loadServerConfigFromString(char *config) {
         }
         sdsfreesplitres(argv,argc);
     }
-    sdsfreesplitres(lines,totlines);
 
     /* Sanity checks. */
     if (server.cluster_enabled && server.masterhost) {
+        linenum = slaveof_linenum;
+        i = linenum-1;
         err = "slaveof directive not allowed in cluster mode";
         goto loaderr;
     }
+
+    sdsfreesplitres(lines,totlines);
     return;
 
 loaderr:
@@ -1486,8 +1491,9 @@ void rewriteConfigSlaveofOption(struct rewriteConfigState *state) {
     sds line;
 
     /* If this is a master, we want all the slaveof config options
-     * in the file to be removed. */
-    if (server.masterhost == NULL) {
+     * in the file to be removed. Note that if this is a cluster instance
+     * we don't want a slaveof directive inside redis.conf. */
+    if (server.cluster_enabled || server.masterhost == NULL) {
         rewriteConfigMarkAsProcessed(state,"slaveof");
         return;
     }

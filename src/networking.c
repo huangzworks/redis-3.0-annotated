@@ -893,10 +893,10 @@ void freeClient(redisClient *c) {
     if (c->flags & REDIS_SLAVE) {
         char ip[REDIS_IP_STR_LEN];
 
-        if (anetPeerToString(c->fd,ip,sizeof(ip),NULL) == -1)
-            strncpy(ip,"?",REDIS_IP_STR_LEN);
-        redisLog(REDIS_WARNING,"Connection with slave %s:%d lost.",
-            ip, c->slave_listening_port);
+        if (anetPeerToString(c->fd,ip,sizeof(ip),NULL) != -1) {
+            redisLog(REDIS_WARNING,"Connection with slave %s:%d lost.",
+                ip, c->slave_listening_port);
+        }
     }
 
     /* Free the query buffer */
@@ -1685,6 +1685,7 @@ sds getClientInfoString(redisClient *client) {
     if (client->flags & REDIS_UNBLOCKED) *p++ = 'u';
     if (client->flags & REDIS_CLOSE_ASAP) *p++ = 'A';
     if (client->flags & REDIS_UNIX_SOCKET) *p++ = 'U';
+    if (client->flags & REDIS_READONLY) *p++ = 'r';
     if (p == flags) *p++ = 'N';
     *p++ = '\0';
 

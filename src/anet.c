@@ -186,15 +186,22 @@ int anetTcpKeepAlive(char *err, int fd)
     return ANET_OK;
 }
 
-/*
- * 解释 host 的地址，并保存到 ipbuf 中
- */
-int anetResolve(char *err, char *host, char *ipbuf, size_t ipbuf_len)
+/* anetGenericResolve() is called by anetResolve() and anetResolveIP() to
+ * do the actual work. It resolves the hostname "host" and set the string
+ * representation of the IP address into the buffer pointed by "ipbuf".
+ *
+ * If flags is set to ANET_IP_ONLY the function only resolves hostnames
+ * that are actually already IPv4 or IPv6 addresses. This turns the function
+ * into a validating / normalizing function. */
+// 解释 host 的地址，并保存到 ipbuf 中
+int anetGenericResolve(char *err, char *host, char *ipbuf, size_t ipbuf_len,
+                       int flags)
 {
     struct addrinfo hints, *info;
     int rv;
 
     memset(&hints,0,sizeof(hints));
+    if (flags & ANET_IP_ONLY) hints.ai_flags = AI_NUMERICHOST;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;  /* specify socktype to avoid dups */
 
@@ -212,6 +219,14 @@ int anetResolve(char *err, char *host, char *ipbuf, size_t ipbuf_len)
 
     freeaddrinfo(info);
     return ANET_OK;
+}
+
+int anetResolve(char *err, char *host, char *ipbuf, size_t ipbuf_len) {
+    return anetGenericResolve(err,host,ipbuf,ipbuf_len,ANET_NONE);
+}
+
+int anetResolveIP(char *err, char *host, char *ipbuf, size_t ipbuf_len) {
+    return anetGenericResolve(err,host,ipbuf,ipbuf_len,ANET_IP_ONLY);
 }
 
 static int anetSetReuseAddr(char *err, int fd) {
@@ -248,43 +263,50 @@ static int anetCreateSocket(char *err, int domain) {
 #define ANET_CONNECT_NONBLOCK 1
 static int anetTcpGenericConnect(char *err, char *addr, int port, int flags)
 {
-    int s, rv;
-    char _port[6];  /* strlen("65535"); */
+    int s = ANET_ERR, rv;
+    char portstr[6];  /* strlen("65535") + 1; */
     struct addrinfo hints, *servinfo, *p;
 
-    snprintf(_port,6,"%d",port);
+    snprintf(portstr,sizeof(portstr),"%d",port);
     memset(&hints,0,sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    if ((rv = getaddrinfo(addr,_port,&hints,&servinfo)) != 0) {
+    if ((rv = getaddrinfo(addr,portstr,&hints,&servinfo)) != 0) {
         anetSetError(err, "%s", gai_strerror(rv));
         return ANET_ERR;
     }
     for (p = servinfo; p != NULL; p = p->ai_next) {
+        /* Try to create the socket and to connect it.
+         * If we fail in the socket() call, or on connect(), we retry with
+         * the next entry in servinfo. */
         if ((s = socket(p->ai_family,p->ai_socktype,p->ai_protocol)) == -1)
             continue;
-
-        /* if we set err then goto cleanup, otherwise next */
         if (anetSetReuseAddr(err,s) == ANET_ERR) goto error;
         if (flags & ANET_CONNECT_NONBLOCK && anetNonBlock(err,s) != ANET_OK)
             goto error;
         if (connect(s,p->ai_addr,p->ai_addrlen) == -1) {
-            if (errno == EINPROGRESS && flags & ANET_CONNECT_NONBLOCK) goto end;
+            /* If the socket is non-blocking, it is ok for connect() to
+             * return an EINPROGRESS error here. */
+            if (errno == EINPROGRESS && flags & ANET_CONNECT_NONBLOCK)
+                goto end;
             close(s);
+            s = ANET_ERR;
             continue;
         }
 
-        /* break with the socket */
+        /* If we ended an iteration of the for loop without errors, we
+         * have a connected socket. Let's return to the caller. */
         goto end;
     }
-    if (p == NULL) {
+    if (p == NULL)
         anetSetError(err, "creating socket: %s", strerror(errno));
-        goto error;
-    }
 
 error:
-    s = ANET_ERR;
+    if (s != ANET_ERR) {
+        close(s);
+        s = ANET_ERR;
+    }
 end:
     freeaddrinfo(servinfo);
     return s;
@@ -543,7 +565,7 @@ int anetPeerToString(int fd, char *ip, size_t ip_len, int *port) {
     socklen_t salen = sizeof(sa);
 
     if (getpeername(fd,(struct sockaddr*)&sa,&salen) == -1) {
-        *port = 0;
+        if (port) *port = 0;
         ip[0] = '?';
         ip[1] = '\0';
         return -1;
@@ -568,7 +590,7 @@ int anetSockName(int fd, char *ip, size_t ip_len, int *port) {
     socklen_t salen = sizeof(sa);
 
     if (getsockname(fd,(struct sockaddr*)&sa,&salen) == -1) {
-        *port = 0;
+        if (port) *port = 0;
         ip[0] = '?';
         ip[1] = '\0';
         return -1;

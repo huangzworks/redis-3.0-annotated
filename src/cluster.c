@@ -38,6 +38,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 
 clusterNode *createClusterNode(char *nodename, int flags);
 int clusterAddNode(clusterNode *node);
@@ -112,11 +113,18 @@ int clusterLoadConfig(char *filename) {
     line = zmalloc(maxline);
     while(fgets(line,maxline,fp) != NULL) {
         int argc;
-        sds *argv = sdssplitargs(line,&argc);
-        if (argv == NULL) goto fmterr;
-
+        sds *argv;
         clusterNode *n, *master;
         char *p, *s;
+
+        /* Skip blank lines, they can be created either by users manually
+         * editing nodes.conf or by the config writing process if stopped
+         * before the truncate() call. */
+        if (line[0] == '\n') continue;
+
+        /* Split the line into arguments for processing. */
+        argv = sdssplitargs(line,&argc);
+        if (argv == NULL) goto fmterr;
 
         /* Create this node if it does not exist */
         // 检查节点是否已经存在
@@ -260,8 +268,7 @@ int clusterLoadConfig(char *filename) {
         server.cluster->myself->name);
     // 设置配置纪元
     clusterSetStartupEpoch();
-    // 更新节点状态
-    clusterUpdateState();
+
     return REDIS_OK;
 
 fmterr:
@@ -273,21 +280,46 @@ fmterr:
 /* Cluster node configuration is exactly the same as CLUSTER NODES output.
  *
  * This function writes the node config and returns 0, on error -1
- * is returned. */
+ * is returned.
+ *
+ * Note: we need to write the file in an atomic way from the point of view
+ * of the POSIX filesystem semantics, so that if the server is stopped
+ * or crashes during the write, we'll end with either the old file or the
+ * new one. Since we have the full payload to write available we can use
+ * a single write to write the whole file. If the pre-existing file was
+ * bigger we pad our payload with newlines that are anyway ignored and truncate
+ * the file afterward. */
 // 写入 nodes.conf 文件
 int clusterSaveConfig(int do_fsync) {
     sds ci = clusterGenNodesDescription(REDIS_NODE_HANDSHAKE);
+    size_t content_size = sdslen(ci);
+    struct stat sb;
     int fd;
     
-    if ((fd = open(server.cluster_configfile,O_WRONLY|O_CREAT|O_TRUNC,0644))
+    if ((fd = open(server.cluster_configfile,O_WRONLY|O_CREAT,0644))
         == -1) goto err;
+
+    /* Pad the new payload if the existing file length is greater. */
+    if (fstat(fd,&sb) != -1) {
+        if (sb.st_size > content_size) {
+            ci = sdsgrowzero(ci,sb.st_size);
+            memset(ci+content_size,'\n',sb.st_size-content_size);
+        }
+    }
     if (write(fd,ci,sdslen(ci)) != (ssize_t)sdslen(ci)) goto err;
     if (do_fsync) fsync(fd);
+
+    /* Truncate the file if needed to remove the final \n padding that
+     * is just garbage. */
+    if (content_size != sdslen(ci) && ftruncate(fd,content_size) == -1) {
+        /* ftruncate() failing is not a critical error. */
+    }
     close(fd);
     sdsfree(ci);
     return 0;
 
 err:
+    if (fd != -1) close(fd);
     sdsfree(ci);
     return -1;
 }
@@ -855,7 +887,7 @@ void clusterRenameNode(clusterNode *node, char *newname) {
  *
  * Currently the REDIS_CLUSTER_BLACKLIST_TTL is set to 1 minute, this means
  * that redis-trib has 60 seconds to send CLUSTER FORGET messages to nodes
- * in the cluster without dealing with the problem if other nodes re-adding
+ * in the cluster without dealing with the problem of other nodes re-adding
  * back the node to nodes we already sent the FORGET command to.
  *
  * REDIS_CLUSTER_BLACKLIST_TTL 当前的值为 1 分钟，
@@ -915,11 +947,15 @@ void clusterBlacklistAddNode(clusterNode *node) {
     clusterBlacklistCleanup();
 
     // 添加节点
-    if (dictAdd(server.cluster->nodes_black_list,id,NULL) == DICT_ERR)
-        sdsfree(id); /* Key was already there. */
+    if (dictAdd(server.cluster->nodes_black_list,id,NULL) == DICT_OK) {
+        /* If the key was added, duplicate the sds string representation of
+         * the key for the next lookup. We'll free it at the end. */
+        id = sdsdup(id);
+    }
     // 设置过期时间
-    de = dictFind(server.cluster->nodes_black_list,node->name);
-    dictSetUnsignedIntegerVal(de,time(NULL));
+    de = dictFind(server.cluster->nodes_black_list,id);
+    dictSetUnsignedIntegerVal(de,time(NULL)+REDIS_CLUSTER_BLACKLIST_TTL);
+    sdsfree(id);
 }
 
 /* Return non-zero if the specified node ID exists in the blacklist.
@@ -932,6 +968,9 @@ int clusterBlacklistExists(char *nodeid) {
     // 构建 SDS 表示的节点名
     sds id = sdsnewlen(nodeid,REDIS_CLUSTER_NAMELEN);
     int retval;
+
+    // 清除过期黑名单
+    clusterBlacklistCleanup();
 
     // 检查节点是否存在
     retval = dictFind(server.cluster->nodes_black_list,id) != NULL;
@@ -1302,13 +1341,17 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
              *
              * Note that we require that the sender of this gossip message
              * is a well known node in our cluster, otherwise we risk
-             * joining another cluster. 
+             * joining another cluster.
              *
              * 注意，当前节点必须保证 sender 是本集群的节点，
              * 否则我们将有加入了另一个集群的风险。
              */
-            if (sender && !(flags & REDIS_NODE_NOADDR))
+            if (sender &&
+                !(flags & REDIS_NODE_NOADDR) &&
+                !clusterBlacklistExists(g->nodename))
+            {
                 clusterStartHandshake(g->ip,ntohs(g->port));
+            }
         }
 
         /* Next node */
@@ -1861,49 +1904,42 @@ int clusterProcessPacket(clusterLink *link) {
          */
 
         /* Many checks are only needed if the set of served slots this
-         * instance claims is different compared to the set of slots we have for
-         * it. Check this ASAP to avoid other computational expansive checks later. 
-         *
-         * 大部分操作都只会在当前节点对 sender 的槽分配和 sender 实际的槽分配之间出现区别时，
-         * 才会进行。
-         */
-        clusterNode *sender_master = NULL; /* Sender or its master if it is a slave. */
+         * instance claims is different compared to the set of slots we have
+         * for it. Check this ASAP to avoid other computational expansive
+         * checks later. */
+        clusterNode *sender_master = NULL; /* Sender or its master if slave. */
         int dirty_slots = 0; /* Sender claimed slots don't match my view? */
 
         if (sender) {
-
-            // 如果 sender 是主节点，那么指向 sender
-            // 否则指向 sender 正在复制的主节点
-            sender_master = (sender->flags & REDIS_NODE_MASTER) ? sender :
-                                                                  sender->slaveof;
-
-            // 检查 sender_master 处理的槽是否出现了变动
+            sender_master = (sender->flags & REDIS_NODE_MASTER) ?
+                sender : sender->slaveof;
             if (sender_master) {
                 dirty_slots = memcmp(sender_master->slots,
                         hdr->myslots,sizeof(hdr->myslots)) != 0;
             }
         }
 
-        /* 1) If the sender of the message is a master, and we detected that the
-         *    set of slots it claims changed, scan the slots to see if we need
-         *    to update our configuration. */
+        /* 1) If the sender of the message is a master, and we detected that
+         *    the set of slots it claims changed, scan the slots to see if we
+         *    need to update our configuration. */
         // 如果 sender 是主节点，并且 sender 的槽布局出现了变动
         // 那么检查当前节点对 sender 的槽布局设置，看是否需要进行更新
         if (sender && sender->flags & REDIS_NODE_MASTER && dirty_slots) {
             clusterUpdateSlotsConfigWith(sender,senderConfigEpoch,hdr->myslots);
         }
 
-        /* 2) We also check for the reverse condition, that is, the sender claims
-         *    to serve slots we know are served by a master with a greater
-         *    configEpoch. If this happens we inform the sender.
+        /* 2) We also check for the reverse condition, that is, the sender
+         *    claims to serve slots we know are served by a master with a
+         *    greater configEpoch. If this happens we inform the sender.
          *
          *    检测和条件 1 的相反条件，也即是，
          *    sender 处理的槽的配置纪元比当前节点已知的某个节点的配置纪元要低，
          *    如果是这样的话，通知 sender 。
          *
-         * This is useful because sometimes after a partition heals, a reappearing
-         * master may be the last one to claim a given set of hash slots, but with
-         * a configuration that other instances know to be deprecated. Example:
+         * This is useful because sometimes after a partition heals, a
+         * reappearing master may be the last one to claim a given set of
+         * hash slots, but with a configuration that other instances know to
+         * be deprecated. Example:
          *
          * 这种情况可能会出现在网络分裂中，
          * 一个重新上线的主节点可能会带有已经过时的槽布局。
@@ -1920,17 +1956,15 @@ int clusterProcessPacket(clusterLink *link) {
          * B 从网络中分裂出去， A 重新上线（但是它所使用的槽布局是旧的）。
          *
          * Usually B would PING A publishing its set of served slots and its
-         * configEpoch, but because of the partition B can't inform A of the new
-         * configuration, so other nodes that have an updated table must do it.
+         * configEpoch, but because of the partition B can't inform A of the
+         * new configuration, so other nodes that have an updated table must
+         * do it. In this way A will stop to act as a master (or can try to
+         * failover if there are the conditions to win the election).
          *
          * 在正常情况下， B 应该向 A 发送 PING 消息，告知 A ，自己（B）已经接替了
          * 槽 1、 2、 3 ，并且带有更更的配置纪元，但因为网络分裂的缘故，
          * 节点 B 没办法通知节点 A ，
          * 所以通知节点 A 它带有的槽布局已经更新的工作就交给其他知道 B 带有更高配置纪元的节点来做。
-         *
-         * In this way A will stop to act as a master (or can try to failover if
-         * there are the conditions to win the election). 
-         *
          * 当 A 接到其他节点关于节点 B 的消息时，
          * 节点 A 就会停止自己的主节点工作，又或者重新进行故障转移。
          */
@@ -1980,9 +2014,9 @@ int clusterProcessPacket(clusterLink *link) {
 
             // 获取下线节点的消息
             failing = clusterLookupNode(hdr->data.fail.about.nodename);
-
             // 下线的节点既不是当前节点，也没有处于 FAIL 状态
-            if (failing && !(failing->flags & (REDIS_NODE_FAIL|REDIS_NODE_MYSELF)))
+            if (failing &&
+                !(failing->flags & (REDIS_NODE_FAIL|REDIS_NODE_MYSELF)))
             {
                 redisLog(REDIS_NOTICE,
                     "FAIL message received from %.40s about %.40s",
@@ -2009,8 +2043,9 @@ int clusterProcessPacket(clusterLink *link) {
         /* Don't bother creating useless objects if there are no
          * Pub/Sub subscribers. */
         // 只在有订阅者时创建消息对象
-        if (dictSize(server.pubsub_channels) || listLength(server.pubsub_patterns)) {
-
+        if (dictSize(server.pubsub_channels) ||
+           listLength(server.pubsub_patterns))
+        {
             // 频道长度
             channel_len = ntohl(hdr->data.publish.msg.channel_len);
 
@@ -2023,8 +2058,8 @@ int clusterProcessPacket(clusterLink *link) {
 
             // 消息
             message = createStringObject(
-                        (char*)hdr->data.publish.msg.bulk_data+channel_len, message_len);
-
+                        (char*)hdr->data.publish.msg.bulk_data+channel_len,
+                        message_len);
             // 发送消息
             pubsubPublishMessage(channel,message);
 
@@ -2084,7 +2119,8 @@ int clusterProcessPacket(clusterLink *link) {
         // 那么说明这个节点已经变为主节点，将它设置为主节点
         if (n->flags & REDIS_NODE_SLAVE) clusterSetNodeAsMaster(n);
 
-        /* Check the bitmap of served slots and udpate our config accordingly. */
+        /* Check the bitmap of served slots and udpate our
+         * config accordingly. */
         // 将消息中对 n 的槽布局与当前节点对 n 的槽布局进行对比
         // 在有需要时更新当前节点对 n 的槽布局的认识
         clusterUpdateSlotsConfigWith(n,reportedConfigEpoch,
@@ -3158,9 +3194,9 @@ void clusterCron(void) {
 
     // 如果条件满足的话，执行故障转移
     clusterHandleSlaveFailover();
-
     // 更新节点状态
-    if (update_state) clusterUpdateState();
+    if (update_state || server.cluster->state == REDIS_CLUSTER_FAIL)
+        clusterUpdateState();
 }
 
 /* This function is called before the event handler returns to sleep for
@@ -3322,13 +3358,30 @@ int clusterDelNodeSlots(clusterNode *node) {
  * Cluster state evaluation function
  * -------------------------------------------------------------------------- */
 
+/* The following are defines that are only used in the evaluation function
+ * and are based on heuristics. Actaully the main point about the rejoin and
+ * writable delay is that they should be a few orders of magnitude larger
+ * than the network latency. */
 #define REDIS_CLUSTER_MAX_REJOIN_DELAY 5000
+#define REDIS_CLUSTER_MIN_REJOIN_DELAY 500
+#define REDIS_CLUSTER_WRITABLE_DELAY 2000
 
 // 更新节点状态
 void clusterUpdateState(void) {
     int j, new_state;
     int unreachable_masters = 0;
     static mstime_t among_minority_time;
+    static mstime_t first_call_time = 0;
+
+    /* If this is a master node, wait some time before turning the state
+     * into OK, since it is not a good idea to rejoin the cluster as a writable
+     * master, after a reboot, without giving the cluster a chance to
+     * reconfigure this node. Note that the delay is calculated starting from
+     * the first call to this function and not since the server start, in order
+     * to don't count the DB loading time. */
+    if (first_call_time == 0) first_call_time = mstime();
+    if (server.cluster->myself->flags & REDIS_NODE_MASTER &&
+        mstime() - first_call_time < REDIS_CLUSTER_WRITABLE_DELAY) return;
 
     /* Start assuming the state is OK. We'll turn it into FAIL if there
      * are the right conditions. */
@@ -3399,6 +3452,8 @@ void clusterUpdateState(void) {
          * a configuration update. */
         if (rejoin_delay > REDIS_CLUSTER_MAX_REJOIN_DELAY)
             rejoin_delay = REDIS_CLUSTER_MAX_REJOIN_DELAY;
+        if (rejoin_delay < REDIS_CLUSTER_MIN_REJOIN_DELAY)
+            rejoin_delay = REDIS_CLUSTER_MIN_REJOIN_DELAY;
 
         if (new_state == REDIS_CLUSTER_OK &&
             server.cluster->myself->flags & REDIS_NODE_MASTER &&
@@ -3514,18 +3569,98 @@ void clusterSetMaster(clusterNode *n) {
     if (myself->flags & REDIS_NODE_MASTER) {
         myself->flags &= ~REDIS_NODE_MASTER;
         myself->flags |= REDIS_NODE_SLAVE;
+    } else {
+        if (myself->slaveof)
+            clusterNodeRemoveSlave(myself->slaveof,myself);
     }
 
     // 将 slaveof 属性指向主节点
     myself->slaveof = n;
 
     // 设置主节点的 IP 和地址，开始对它进行复制
+    clusterNodeAddSlave(n,myself);
     replicationSetMaster(n->ip, n->port);
 }
 
 /* -----------------------------------------------------------------------------
  * CLUSTER command
  * -------------------------------------------------------------------------- */
+
+/* Generate a csv-alike representation of the specified cluster node.
+ * See clusterGenNodesDescription() top comment for more information.
+ *
+ * The function returns the string representation as an SDS string. */
+sds clusterGenNodeDescription(clusterNode *node) {
+    int j, start;
+    sds ci;
+
+    /* Node coordinates */
+    ci = sdscatprintf(sdsempty(),"%.40s %s:%d ",
+        node->name,
+        node->ip,
+        node->port);
+
+    /* Flags */
+    if (node->flags == 0) ci = sdscat(ci,"noflags,");
+    if (node->flags & REDIS_NODE_MYSELF) ci = sdscat(ci,"myself,");
+    if (node->flags & REDIS_NODE_MASTER) ci = sdscat(ci,"master,");
+    if (node->flags & REDIS_NODE_SLAVE) ci = sdscat(ci,"slave,");
+    if (node->flags & REDIS_NODE_PFAIL) ci = sdscat(ci,"fail?,");
+    if (node->flags & REDIS_NODE_FAIL) ci = sdscat(ci,"fail,");
+    if (node->flags & REDIS_NODE_HANDSHAKE) ci =sdscat(ci,"handshake,");
+    if (node->flags & REDIS_NODE_NOADDR) ci = sdscat(ci,"noaddr,");
+    if (ci[sdslen(ci)-1] == ',') ci[sdslen(ci)-1] = ' ';
+
+    /* Slave of... or just "-" */
+    if (node->slaveof)
+        ci = sdscatprintf(ci,"%.40s ",node->slaveof->name);
+    else
+        ci = sdscatprintf(ci,"- ");
+
+    /* Latency from the POV of this node, link status */
+    ci = sdscatprintf(ci,"%lld %lld %llu %s",
+        (long long) node->ping_sent,
+        (long long) node->pong_received,
+        (unsigned long long) node->configEpoch,
+        (node->link || node->flags & REDIS_NODE_MYSELF) ?
+                    "connected" : "disconnected");
+
+    /* Slots served by this instance */
+    start = -1;
+    for (j = 0; j < REDIS_CLUSTER_SLOTS; j++) {
+        int bit;
+
+        if ((bit = clusterNodeGetSlotBit(node,j)) != 0) {
+            if (start == -1) start = j;
+        }
+        if (start != -1 && (!bit || j == REDIS_CLUSTER_SLOTS-1)) {
+            if (j == REDIS_CLUSTER_SLOTS-1) j++;
+
+            if (start == j-1) {
+                ci = sdscatprintf(ci," %d",start);
+            } else {
+                ci = sdscatprintf(ci," %d-%d",start,j-1);
+            }
+            start = -1;
+        }
+    }
+
+    /* Just for MYSELF node we also dump info about slots that
+     * we are migrating to other instances or importing from other
+     * instances. */
+    if (node->flags & REDIS_NODE_MYSELF) {
+        for (j = 0; j < REDIS_CLUSTER_SLOTS; j++) {
+            if (server.cluster->migrating_slots_to[j]) {
+                ci = sdscatprintf(ci," [%d->-%.40s]",j,
+                    server.cluster->migrating_slots_to[j]->name);
+            } else if (server.cluster->importing_slots_from[j]) {
+                ci = sdscatprintf(ci," [%d-<-%.40s]",j,
+                    server.cluster->importing_slots_from[j]->name);
+            }
+        }
+    }
+    return ci;
+}
 
 /* Generate a csv-alike representation of the nodes we are aware of,
  * including the "myself" node, and return an SDS string containing the
@@ -3551,10 +3686,9 @@ void clusterSetMaster(clusterNode *n) {
  * 以及用于生成 nodes.conf 配置文件。
  */
 sds clusterGenNodesDescription(int filter) {
-    sds ci = sdsempty();
+    sds ci = sdsempty(), ni;
     dictIterator *di;
     dictEntry *de;
-    int j, start;
 
     // 遍历集群中的所有节点
     di = dictGetSafeIterator(server.cluster->nodes);
@@ -3564,77 +3698,9 @@ sds clusterGenNodesDescription(int filter) {
         // 不打印包含指定 flag 的节点
         if (node->flags & filter) continue;
 
-        /* Node coordinates */
-        // 节点的名字、IP 和端口号
-        ci = sdscatprintf(ci,"%.40s %s:%d ",
-            node->name,
-            node->ip,
-            node->port);
-
-        /* Flags */
-        // 打印节点的 flag
-        if (node->flags == 0) ci = sdscat(ci,"noflags,");
-        if (node->flags & REDIS_NODE_MYSELF) ci = sdscat(ci,"myself,");
-        if (node->flags & REDIS_NODE_MASTER) ci = sdscat(ci,"master,");
-        if (node->flags & REDIS_NODE_SLAVE) ci = sdscat(ci,"slave,");
-        if (node->flags & REDIS_NODE_PFAIL) ci = sdscat(ci,"fail?,");
-        if (node->flags & REDIS_NODE_FAIL) ci = sdscat(ci,"fail,");
-        if (node->flags & REDIS_NODE_HANDSHAKE) ci =sdscat(ci,"handshake,");
-        if (node->flags & REDIS_NODE_NOADDR) ci = sdscat(ci,"noaddr,");
-        if (ci[sdslen(ci)-1] == ',') ci[sdslen(ci)-1] = ' ';
-
-        /* Slave of... or just "-" */
-        // 是否从节点？如果是的话输出主节点的名字，否则输出 "- "
-        if (node->slaveof)
-            ci = sdscatprintf(ci,"%.40s ",node->slaveof->name);
-        else
-            ci = sdscatprintf(ci,"- ");
-
-        /* Latency from the POV of this node, link status */
-        // 当前节点和该节点的延迟值，以及连接状态
-        ci = sdscatprintf(ci,"%lld %lld %llu %s",
-            (long long) node->ping_sent,
-            (long long) node->pong_received,
-            (unsigned long long) node->configEpoch,
-            (node->link || node->flags & REDIS_NODE_MYSELF) ?
-                        "connected" : "disconnected");
-
-        /* Slots served by this instance */
-        // 该节点负责处理的槽
-        start = -1;
-        for (j = 0; j < REDIS_CLUSTER_SLOTS; j++) {
-            int bit;
-
-            if ((bit = clusterNodeGetSlotBit(node,j)) != 0) {
-                if (start == -1) start = j;
-            }
-            if (start != -1 && (!bit || j == REDIS_CLUSTER_SLOTS-1)) {
-                if (j == REDIS_CLUSTER_SLOTS-1) j++;
-
-                if (start == j-1) {
-                    ci = sdscatprintf(ci," %d",start);
-                } else {
-                    ci = sdscatprintf(ci," %d-%d",start,j-1);
-                }
-                start = -1;
-            }
-        }
-
-        /* Just for MYSELF node we also dump info about slots that
-         * we are migrating to other instances or importing from other
-         * instances. */
-        // 如果被输出的是当前节点的信息，那么将当前节点正在进行迁移或者导入的槽也输出
-        if (node->flags & REDIS_NODE_MYSELF) {
-            for (j = 0; j < REDIS_CLUSTER_SLOTS; j++) {
-                if (server.cluster->migrating_slots_to[j]) {
-                    ci = sdscatprintf(ci," [%d->-%.40s]",j,
-                        server.cluster->migrating_slots_to[j]->name);
-                } else if (server.cluster->importing_slots_from[j]) {
-                    ci = sdscatprintf(ci," [%d-<-%.40s]",j,
-                        server.cluster->importing_slots_from[j]->name);
-                }
-            }
-        }
+        ni = clusterGenNodeDescription(node);
+        ci = sdscatsds(ci,ni);
+        sdsfree(ni);
         ci = sdscatlen(ci,"\n",1);
     }
     dictReleaseIterator(di);
@@ -3647,7 +3713,7 @@ int getSlotOrReply(redisClient *c, robj *o) {
     long long slot;
 
     if (getLongLongFromObject(o,&slot) != REDIS_OK ||
-        slot < 0 || slot > REDIS_CLUSTER_SLOTS)
+        slot < 0 || slot >= REDIS_CLUSTER_SLOTS)
     {
         addReplyError(c,"Invalid or out of range slot");
         return -1;
@@ -4036,8 +4102,17 @@ void clusterCommand(redisClient *c) {
         if (!n) {
             addReplyErrorFormat(c,"Unknown node %s", (char*)c->argv[2]->ptr);
             return;
+        } else if (n == server.cluster->myself) {
+            addReplyError(c,"I tried hard but I can't forget myself...");
+            return;
+        } else if (server.cluster->myself->flags & REDIS_NODE_SLAVE &&
+                   server.cluster->myself->slaveof == n) {
+            addReplyError(c,"Can't forget my master!");
+            return;
         }
 
+        // 将集群添加到黑名单
+        clusterBlacklistAddNode(n);
         // 从集群中删除该节点
         clusterDelNode(n);
 
@@ -4071,12 +4146,13 @@ void clusterCommand(redisClient *c) {
             return;
         }
 
-        /* We should have no assigned slots to accept to replicate some
-         * other node. */
-        // 如果我们将这个节点设置为从节点，那么这个节点负责处理的槽数量必须为 0
-        // 并且数据库必须为空
-        if (server.cluster->myself->numslots != 0 ||
-            dictSize(server.db[0].dict) != 0)
+        /* If the instance is currently a master, it should have no assigned
+         * slots nor keys to accept to replicate some other node.
+         * Slaves can switch to another master without issues. */
+        // 节点必须没有被指派任何槽，并且数据库必须为空
+        if (server.cluster->myself->flags & REDIS_NODE_MASTER &&
+            (server.cluster->myself->numslots != 0 ||
+            dictSize(server.db[0].dict) != 0))
         {
             addReplyError(c,"To set a master the node must be empty and without assigned slots.");
             return;
@@ -4087,6 +4163,28 @@ void clusterCommand(redisClient *c) {
         clusterSetMaster(n);
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE|CLUSTER_TODO_SAVE_CONFIG);
         addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"slaves") && c->argc == 3) {
+        /* CLUSTER SLAVES <NODE ID> */
+        clusterNode *n = clusterLookupNode(c->argv[2]->ptr);
+        int j;
+
+        /* Lookup the specified node in our table. */
+        if (!n) {
+            addReplyErrorFormat(c,"Unknown node %s", (char*)c->argv[2]->ptr);
+            return;
+        }
+
+        if (n->flags & REDIS_NODE_SLAVE) {
+            addReplyError(c,"The specified node is not a master");
+            return;
+        }
+
+        addReplyMultiBulkLen(c,n->numslaves);
+        for (j = 0; j < n->numslaves; j++) {
+            sds ni = clusterGenNodeDescription(n->slaves[j]);
+            addReplyBulkCString(c,ni);
+            sdsfree(ni);
+        }
     } else {
         addReplyError(c,"Wrong CLUSTER subcommand or number of arguments");
     }
@@ -4217,7 +4315,7 @@ void dumpCommand(redisClient *c) {
 /* RESTORE key ttl serialized-value [REPLACE] */
 // 根据给定的 DUMP 数据，还原出一个键值对数据，并将它保存到数据库里面
 void restoreCommand(redisClient *c) {
-    long ttl;
+    long long ttl;
     rio payload;
     int j, type, replace = 0;
     robj *obj;
@@ -4242,7 +4340,7 @@ void restoreCommand(redisClient *c) {
 
     /* Check if the TTL value makes sense */
     // 取出（可能有的） TTL 值
-    if (getLongFromObjectOrReply(c,c->argv[2],&ttl,NULL) != REDIS_OK) {
+    if (getLongLongFromObjectOrReply(c,c->argv[2],&ttl,NULL) != REDIS_OK) {
         return;
     } else if (ttl < 0) {
         addReplyError(c,"Invalid TTL value, must be >= 0");
@@ -4251,7 +4349,8 @@ void restoreCommand(redisClient *c) {
 
     /* Verify RDB version and data checksum. */
     // 检查 RDB 版本和校验和
-    if (verifyDumpPayload(c->argv[3]->ptr,sdslen(c->argv[3]->ptr)) == REDIS_ERR) {
+    if (verifyDumpPayload(c->argv[3]->ptr,sdslen(c->argv[3]->ptr)) == REDIS_ERR)
+    {
         addReplyError(c,"DUMP payload version or checksum are wrong");
         return;
     }
@@ -4617,6 +4716,10 @@ socket_rd_err:
     return;
 }
 
+/* -----------------------------------------------------------------------------
+ * Cluster functions related to serving / redirecting clients
+ * -------------------------------------------------------------------------- */
+
 /* The ASKING command is required after a -ASK redirection.
  *
  * 客户端在接到 -ASK 转向之后，需要发送 ASKING 命令。
@@ -4641,9 +4744,23 @@ void askingCommand(redisClient *c) {
     addReply(c,shared.ok);
 }
 
-/* -----------------------------------------------------------------------------
- * Cluster functions related to serving / redirecting clients
- * -------------------------------------------------------------------------- */
+/* The READONLY command is uesd by clients to enter the read-only mode.
+ * In this mode slaves will not redirect clients as long as clients access
+ * with read-only commands to keys that are served by the slave's master. */
+void readonlyCommand(redisClient *c) {
+    if (server.cluster_enabled == 0) {
+        addReplyError(c,"This instance has cluster support disabled");
+        return;
+    }
+    c->flags |= REDIS_READONLY;
+    addReply(c,shared.ok);
+}
+
+/* The READWRITE command just clears the READONLY command state. */
+void readwriteCommand(redisClient *c) {
+    c->flags &= ~REDIS_READONLY;
+    addReply(c,shared.ok);
+}
 
 /* Return the pointer to the cluster node that is able to serve the command.
  * For the function to succeed the command should only target a single
@@ -4786,6 +4903,17 @@ clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **arg
     // 那么将这个命令的执行者设置为当前节点
     if (server.cluster->importing_slots_from[slot] != NULL &&
         (c->flags & REDIS_ASKING || cmd->flags & REDIS_CMD_ASKING)) {
+        return server.cluster->myself;
+    }
+
+    /* Handle the read-only client case reading from a slave: if this
+     * node is a slave and the request is about an hash slot our master
+     * is serving, we can reply without redirection. */
+    if (c->flags & REDIS_READONLY &&
+        cmd->flags & REDIS_CMD_READONLY &&
+        server.cluster->myself->flags & REDIS_NODE_SLAVE &&
+        server.cluster->myself->slaveof == n)
+    {
         return server.cluster->myself;
     }
 

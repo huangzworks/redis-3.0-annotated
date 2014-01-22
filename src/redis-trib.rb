@@ -119,17 +119,19 @@ class ClusterNode
         nodes.each{|n|
             # name addr flags role ping_sent ping_recv link_status slots
             split = n.split
-            name,addr,flags,role,ping_sent,ping_recv,config_epoch,link_status = split[0..6]
+            name,addr,flags,master_id,ping_sent,ping_recv,config_epoch,link_status = split[0..6]
             slots = split[8..-1]
             info = {
                 :name => name,
                 :addr => addr,
                 :flags => flags.split(","),
-                :role => role,
+                :replicate => master_id,
                 :ping_sent => ping_sent.to_i,
                 :ping_recv => ping_recv.to_i,
                 :link_status => link_status
             }
+            info[:replicate] = false if master_id == "-"
+
             if info[:flags].index("myself")
                 @info = @info.merge(info)
                 @info[:slots] = {}
@@ -238,12 +240,18 @@ class ClusterNode
         role = self.has_flag?("master") ? "M" : "S"
 
         if self.info[:replicate] and @dirty
-            "S: #{self.info[:name]} #{self.to_s}"
+            is = "S: #{self.info[:name]} #{self.to_s}"
         else
-            "#{role}: #{self.info[:name]} #{self.to_s}\n"+
+            is = "#{role}: #{self.info[:name]} #{self.to_s}\n"+
             "   slots:#{slots} (#{self.slots.length} slots) "+
             "#{(self.info[:flags]-["myself"]).join(",")}"
         end
+        if self.info[:replicate]
+            is += "\n   replicates #{info[:replicate]}"
+        elsif self.has_flag?("master") && self.info[:replicas]
+            is += "\n   #{info[:replicas].length} additional replica(s)"
+        end
+        is
     end
 
     # Return a single string representing nodes and associated slots.
@@ -302,6 +310,17 @@ class RedisTrib
             return n if n.info[:name] == name.downcase
         }
         return nil
+    end
+
+    # This function returns the master that has the least number of replicas
+    # in the cluster. If there are multiple masters with the same smaller
+    # number of replicas, one at random is returned.
+    def get_master_with_least_replicas
+        masters = @nodes.select{|n| n.has_flag? "master"}
+        sorted = masters.sort{|a,b|
+            a.info[:replicas].length <=> b.info[:replicas].length
+        }
+        sorted[0]
     end
 
     def check_cluster
@@ -596,6 +615,29 @@ class RedisTrib
             fnode.load_info()
             add_node(fnode)
         }
+        populate_nodes_replicas_info
+    end
+
+    # This function is called by load_cluster_info_from_node in order to
+    # add additional information to every node as a list of replicas.
+    def populate_nodes_replicas_info
+        # Start adding the new field to every node.
+        @nodes.each{|n|
+            n.info[:replicas] = []
+        }
+
+        # Populate the replicas field using the replicate field of slave
+        # nodes.
+        @nodes.each{|n|
+            if n.info[:replicate]
+                master = get_node_by_name(n.info[:replicate])
+                if !master
+                    xputs "*** WARNING: #{n} claims to be slave of unknown node ID #{n.info[:replicate]}."
+                else
+                    master.info[:replicas] << n
+                end
+            end
+        }
     end
 
     # Given a list of source nodes return a "resharding plan"
@@ -795,6 +837,20 @@ class RedisTrib
         load_cluster_info_from_node(argv[1])
         check_cluster
 
+        # If --master-id was specified, try to resolve it now so that we
+        # abort before starting with the node configuration.
+        if opt['slave']
+            if opt['master-id']
+                master = get_node_by_name(opt['master-id'])
+                if !master
+                    xputs "[ERR] No such master ID #{opt['master-id']}"
+                end
+            else
+                master = get_master_with_least_replicas
+                xputs "Automatically selected master #{master}"
+            end
+        end
+
         # Add the new node
         new = ClusterNode.new(argv[0])
         new.connect(:abort => true)
@@ -802,13 +858,61 @@ class RedisTrib
         new.load_info
         new.assert_empty
         first = @nodes.first.info
+        add_node(new)
 
         # Send CLUSTER MEET command to the new node
         xputs ">>> Send CLUSTER MEET to node #{new} to make it join the cluster."
         new.r.cluster("meet",first[:host],first[:port])
+
+        # Additional configuration is needed if the node is added as
+        # a slave.
+        if opt['slave']
+            wait_cluster_join
+            xputs ">>> Configure node as replica of #{master}."
+            new.r.cluster("replicate",master.info[:name])
+        end
+        xputs "[OK] New node added correctly."
     end
 
-    def help_cluster_cmd(opt)
+    def delnode_cluster_cmd(argv,opt)
+        id = argv[1].downcase
+        xputs ">>> Removing node #{id} from cluster #{argv[0]}"
+
+        # Load cluster information
+        load_cluster_info_from_node(argv[0])
+
+        # Check if the node exists and is not empty
+        node = get_node_by_name(id)
+
+        if !node
+            xputs "[ERR] No such node ID #{id}"
+            exit 1
+        end
+
+        if node.slots.length != 0
+            xputs "[ERR] Node #{node} is not empty! Reshard data away and try again."
+            exit 1
+        end
+
+        # Send CLUSTER FORGET to all the nodes but the node to remove
+        xputs ">>> Sending CLUSTER FORGET messages to the cluster..."
+        @nodes.each{|n|
+            next if n == node
+            if n.info[:replicate] && n.info[:replicate].downcase == node_id
+                # Reconfigure the slave to replicate with some other node
+                xputs ">>> #{n} as replica of #{master}"
+                master = get_master_with_least_replicas
+                n.r.cluster("replicate",master.info[:name])
+            end
+            n.r.cluster("forget",argv[1])
+        }
+
+        # Finally shutdown the node
+        xputs ">>> SHUTDOWN the node."
+        node.r.shutdown
+    end
+
+    def help_cluster_cmd(argv,opt)
         show_help
         exit 0
     end
@@ -849,20 +953,27 @@ COMMANDS={
     "fix"     => ["fix_cluster_cmd", 2, "host:port"],
     "reshard" => ["reshard_cluster_cmd", 2, "host:port"],
     "addnode" => ["addnode_cluster_cmd", 3, "new_host:new_port existing_host:existing_port"],
+    "delnode" => ["delnode_cluster_cmd", 3, "host:port node_id"],
     "help"    => ["help_cluster_cmd", 1, "(show this help)"]
 }
 
 ALLOWED_OPTIONS={
-    "create" => {"replicas" => true}
+    "create" => {"replicas" => true},
+    "addnode" => {"slave" => false, "master-id" => true}
 }
 
 def show_help
-    puts "Usage: redis-trib <command> <options> <arguments ...>"
-    puts
+    puts "Usage: redis-trib <command> <options> <arguments ...>\n\n"
     COMMANDS.each{|k,v|
+        o = ""
         puts "  #{k.ljust(10)} #{v[2]}"
+        if ALLOWED_OPTIONS[k]
+            ALLOWED_OPTIONS[k].each{|optname,has_arg|
+                puts "             --#{optname}" + (has_arg ? " <arg>" : "")
+            }
+        end
     }
-    puts
+    puts "\nFor check, fix, reshard, delnode, you can specify host:port of any working node.\n"
 end
 
 # Sanity check

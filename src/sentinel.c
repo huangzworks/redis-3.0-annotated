@@ -602,6 +602,7 @@ dictType leaderVotesDictType = {
 
 void sentinelCommand(redisClient *c);
 void sentinelInfoCommand(redisClient *c);
+void sentinelSetCommand(redisClient *c);
 
 // 服务器在 sentinel 模式下可执行的命令
 struct redisCommand sentinelcmds[] = {
@@ -1362,7 +1363,7 @@ sentinelRedisInstance *createSentinelRedisInstance(char *name, int flags, char *
  *
  * 释放一个实例，以及它的所有从服务器、sentinel ，以及 hiredis 连接。
  *
- * This function also takes care of unlinking the instance from the main
+ * This function does not take care of unlinking the instance from the main
  * masters table (if it is a master) or from its master sentinels/slaves table
  * if it is a slave or sentinel. 
  *
@@ -3088,6 +3089,30 @@ void addReplySentinelRedisInstance(redisClient *c, sentinelRedisInstance *ri) {
         addReplyBulkCString(c,"quorum");
         addReplyBulkLongLong(c,ri->quorum);
         fields++;
+
+        addReplyBulkCString(c,"down-after-milliseconds");
+        addReplyBulkLongLong(c,ri->down_after_period);
+        fields++;
+
+        addReplyBulkCString(c,"failover-timeout");
+        addReplyBulkLongLong(c,ri->failover_timeout);
+        fields++;
+
+        addReplyBulkCString(c,"parallel-syncs");
+        addReplyBulkLongLong(c,ri->parallel_syncs);
+        fields++;
+
+        if (ri->notification_script) {
+            addReplyBulkCString(c,"notification-script");
+            addReplyBulkCString(c,ri->notification_script);
+            fields++;
+        }
+
+        if (ri->client_reconfig_script) {
+            addReplyBulkCString(c,"client-reconfig-script");
+            addReplyBulkCString(c,ri->client_reconfig_script);
+            fields++;
+        }
     }
 
     /* Only slaves */
@@ -3178,8 +3203,14 @@ void sentinelCommand(redisClient *c) {
     if (!strcasecmp(c->argv[1]->ptr,"masters")) {
         /* SENTINEL MASTERS */
         if (c->argc != 2) goto numargserr;
-
         addReplyDictOfRedisInstances(c,sentinel.masters);
+    } else if (!strcasecmp(c->argv[1]->ptr,"master")) {
+        /* SENTINEL MASTER <name> */
+        sentinelRedisInstance *ri;
+
+        if ((ri = sentinelGetMasterByNameOrReplyError(c,c->argv[2]))
+            == NULL) return;
+        addReplySentinelRedisInstance(c,ri);
     } else if (!strcasecmp(c->argv[1]->ptr,"slaves")) {
         /* SENTINEL SLAVES <master-name> */
         sentinelRedisInstance *ri;
@@ -3197,7 +3228,7 @@ void sentinelCommand(redisClient *c) {
             return;
         addReplyDictOfRedisInstances(c,ri->sentinels);
     } else if (!strcasecmp(c->argv[1]->ptr,"is-master-down-by-addr")) {
-        /* SENTINEL IS-MASTER-DOWN-BY-ADDR <ip> <port> <current-epoch> <runid> */
+        /* SENTINEL IS-MASTER-DOWN-BY-ADDR <ip> <port> <current-epoch> <runid>*/
         sentinelRedisInstance *ri;
         long long req_epoch;
         uint64_t leader_epoch = 0;
@@ -3284,6 +3315,53 @@ void sentinelCommand(redisClient *c) {
 
         if (c->argc != 2) goto numargserr;
         sentinelPendingScriptsCommand(c);
+    } else if (!strcasecmp(c->argv[1]->ptr,"monitor")) {
+        /* SENTINEL MONITOR <name> <ip> <port> <quorum> */
+        long quorum, port;
+        char buf[32];
+
+        if (c->argc != 6) goto numargserr;
+        if (getLongFromObjectOrReply(c,c->argv[5],&quorum,"Invalid quorum")
+            != REDIS_OK) return;
+        if (getLongFromObjectOrReply(c,c->argv[4],&port,"Invalid port")
+            != REDIS_OK) return;
+        /* Make sure the IP field is actually a valid IP before passing it
+         * to createSentinelRedisInstance(), otherwise we may trigger a
+         * DNS lookup at runtime. */
+        if (anetResolveIP(NULL,c->argv[3]->ptr,buf,sizeof(buf)) == ANET_ERR) {
+            addReplyError(c,"Invalid IP address specified");
+            return;
+        }
+        if (createSentinelRedisInstance(c->argv[2]->ptr,SRI_MASTER,
+                c->argv[3]->ptr,port,quorum,NULL) == NULL)
+        {
+            switch(errno) {
+            case EBUSY:
+                addReplyError(c,"Duplicated master name");
+                break;
+            case EINVAL:
+                addReplyError(c,"Invalid port number");
+                break;
+            default:
+                addReplyError(c,"Unspecified error adding the instance");
+                break;
+            }
+        } else {
+            sentinelFlushConfig();
+            addReply(c,shared.ok);
+        }
+    } else if (!strcasecmp(c->argv[1]->ptr,"remove")) {
+        /* SENTINEL REMOVE <name> */
+        sentinelRedisInstance *ri;
+
+        if ((ri = sentinelGetMasterByNameOrReplyError(c,c->argv[2]))
+            == NULL) return;
+        dictDelete(sentinel.masters,c->argv[2]->ptr);
+        sentinelFlushConfig();
+        addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"set")) {
+        if (c->argc < 3 || c->argc % 2 == 0) goto numargserr;
+        sentinelSetCommand(c);
     } else {
         addReplyErrorFormat(c,"Unknown sentinel subcommand '%s'",
                                (char*)c->argv[1]->ptr);
@@ -3291,10 +3369,11 @@ void sentinelCommand(redisClient *c) {
     return;
 
 numargserr:
-    addReplyErrorFormat(c,"Wrong number of commands for 'sentinel %s'",
+    addReplyErrorFormat(c,"Wrong number of arguments for 'sentinel %s'",
                           (char*)c->argv[1]->ptr);
 }
 
+/* SENTINEL INFO [section] */
 // sentinel 模式下的 INFO 命令实现
 void sentinelInfoCommand(redisClient *c) {
     char *section = c->argc == 2 ? c->argv[1]->ptr : "default";
@@ -3353,6 +3432,92 @@ void sentinelInfoCommand(redisClient *c) {
         (unsigned long)sdslen(info)));
     addReplySds(c,info);
     addReply(c,shared.crlf);
+}
+
+/* SENTINEL SET <mastername> [<option> <value> ...] */
+void sentinelSetCommand(redisClient *c) {
+    sentinelRedisInstance *ri;
+    int j, changes = 0;
+    char *option, *value;
+
+    if ((ri = sentinelGetMasterByNameOrReplyError(c,c->argv[2]))
+        == NULL) return;
+
+    /* Process option - value pairs. */
+    for (j = 3; j < c->argc; j += 2) {
+        option = c->argv[j]->ptr;
+        value = c->argv[j+1]->ptr;
+        robj *o = c->argv[j+1];
+        long long ll;
+
+        if (!strcasecmp(option,"down-after-milliseconds")) {
+            /* down-after-millisecodns <milliseconds> */
+            if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll <= 0)
+                goto badfmt;
+            ri->down_after_period = ll;
+            changes++;
+        } else if (!strcasecmp(option,"failover-timeout")) {
+            /* failover-timeout <milliseconds> */
+            if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll <= 0)
+                goto badfmt;
+            ri->failover_timeout = ll;
+            changes++;
+       } else if (!strcasecmp(option,"parallel-syncs")) {
+            /* parallel-syncs <milliseconds> */
+            if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll <= 0)
+                goto badfmt;
+            ri->parallel_syncs = ll;
+            changes++;
+       } else if (!strcasecmp(option,"notification-script")) {
+            /* notification-script <path> */
+            if (strlen(value) && access(value,X_OK) == -1) {
+                addReplyError(c,
+                    "Notification script seems non existing or non executable");
+                if (changes) sentinelFlushConfig();
+                return;
+            }
+            sdsfree(ri->notification_script);
+            ri->notification_script = strlen(value) ? sdsnew(value) : NULL;
+            changes++;
+       } else if (!strcasecmp(option,"client-reconfig-script")) {
+            /* client-reconfig-script <path> */
+            if (strlen(value) && access(value,X_OK) == -1) {
+                addReplyError(c,
+                    "Client reconfiguration script seems non existing or "
+                    "non executable");
+                if (changes) sentinelFlushConfig();
+                return;
+            }
+            sdsfree(ri->client_reconfig_script);
+            ri->client_reconfig_script = strlen(value) ? sdsnew(value) : NULL;
+            changes++;
+       } else if (!strcasecmp(option,"auth-pass")) {
+            /* auth-pass <password> */
+            sdsfree(ri->auth_pass);
+            ri->auth_pass = strlen(value) ? sdsnew(value) : NULL;
+            changes++;
+       } else if (!strcasecmp(option,"quorum")) {
+            /* quorum <count> */
+            if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll <= 0)
+                goto badfmt;
+            ri->quorum = ll;
+            changes++;
+        } else {
+            addReplyErrorFormat(c,"Unknown option '%s' for SENTINEL SET",
+                option);
+            if (changes) sentinelFlushConfig();
+            return;
+        }
+    }
+
+    if (changes) sentinelFlushConfig();
+    addReply(c,shared.ok);
+    return;
+
+badfmt: /* Bad format errors */
+    if (changes) sentinelFlushConfig();
+    addReplyErrorFormat(c,"Invalid argument '%s' for SENTINEL SET '%s'",
+            value, option);
 }
 
 /* ===================== SENTINEL availability checks ======================= */

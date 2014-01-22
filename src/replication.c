@@ -578,7 +578,7 @@ void syncCommand(redisClient *c) {
          * of the replication protocol (like redis-cli --slave). Flag the client
          * so that we don't expect to receive REPLCONF ACK feedbacks. */
         // 旧版实现，设置标识，避免接收 REPLCONF ACK 
-        c->flags |= REDIS_PRE_PSYNC_SLAVE;
+        c->flags |= REDIS_PRE_PSYNC;
     }
 
     // 以下是完整重同步的情况。。。
@@ -1079,7 +1079,12 @@ void readSyncBulkPayload(aeEventLoop *el, int fd, void *privdata, int mask) {
         memcpy(server.master->replrunid, server.repl_master_runid,
             sizeof(server.repl_master_runid));
 
-        // 连接完成
+        /* If master offset is set to -1, this master is old and is not
+         * PSYNC capable, so we flag it accordingly. */
+        // 如果 offset 被设置为 -1 ，那么表示主服务器的版本低于 2.8 
+        // 无法使用 PSYNC ，所以需要设置相应的标识值
+        if (server.master->reploff == -1)
+            server.master->flags |= REDIS_PRE_PSYNC;
         redisLog(REDIS_NOTICE, "MASTER <-> SLAVE sync: Finished with success");
 
         /* Restart the AOF subsystem now that we finished the sync. This
@@ -1287,7 +1292,7 @@ int slaveTryPartialResynchronization(int fd) {
 
     /* If we reach this point we receied either an error since the master does
      * not understand PSYNC, or an unexpected reply from the master.
-     * Reply with PSYNC_NOT_SUPPORTED in both cases. */
+     * Return PSYNC_NOT_SUPPORTED to the caller in both cases. */
 
     // 接收到错误？
     if (strncmp(reply,"-ERR",4)) {
@@ -1614,6 +1619,7 @@ void replicationSetMaster(char *ip, int port) {
     // 进入连接状态（重点）
     server.repl_state = REDIS_REPL_CONNECT;
     server.master_repl_offset = 0;
+    server.repl_down_since = 0;
 }
 
 /* Cancel replication, setting the instance as a master itself. */
@@ -2197,10 +2203,14 @@ void replicationCron(void) {
         }
     }
 
-    /* Send ACK to master from time to time. */
-    // slave 定时向 master 发送 ACK
-    // 告知当前从服务器处理的偏移量
-    if (server.masterhost && server.master)
+    /* Send ACK to master from time to time.
+     * Note that we do not send periodic acks to masters that don't
+     * support PSYNC and replication offsets. */
+    // 定期向主服务器发送 ACK 命令
+    // 不过如果主服务器带有 REDIS_PRE_PSYNC 的话就不发送
+    // 因为带有该标识的版本为 < 2.8 的版本，这些版本不支持 ACK 命令
+    if (server.masterhost && server.master &&
+        !(server.master->flags & REDIS_PRE_PSYNC))
         replicationSendAck();
     
     /* If we have attached slaves, PING them from time to time.
@@ -2265,7 +2275,7 @@ void replicationCron(void) {
             if (slave->replstate != REDIS_REPL_ONLINE) continue;
 
             // 不检查旧版的从服务器
-            if (slave->flags & REDIS_PRE_PSYNC_SLAVE) continue;
+            if (slave->flags & REDIS_PRE_PSYNC) continue;
 
             // 释放超时从服务器
             if ((server.unixtime - slave->repl_ack_time) > server.repl_timeout)
