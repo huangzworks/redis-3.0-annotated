@@ -2025,6 +2025,7 @@ int clusterProcessPacket(clusterLink *link) {
                 // 打开 FAIL 状态
                 failing->flags |= REDIS_NODE_FAIL;
                 failing->fail_time = mstime();
+                // 关闭 PFAIL 状态
                 failing->flags &= ~REDIS_NODE_PFAIL;
 
                 clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|CLUSTER_TODO_UPDATE_STATE);
