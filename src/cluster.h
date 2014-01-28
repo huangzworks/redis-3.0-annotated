@@ -143,16 +143,22 @@ struct clusterNode {
     struct clusterNode *slaveof; /* pointer to the master node */
 
     // 最后一次发送 PING 命令的时间
-    mstime_t ping_sent;       /* Unix time we sent latest ping */
+    mstime_t ping_sent;      /* Unix time we sent latest ping */
 
     // 最后一次接收 PONG 回复的时间戳
-    mstime_t pong_received;   /* Unix time we received the pong */
+    mstime_t pong_received;  /* Unix time we received the pong */
 
     // 最后一次被设置为 FAIL 状态的时间
-    mstime_t fail_time;       /* Unix time when FAIL flag was set */
+    mstime_t fail_time;      /* Unix time when FAIL flag was set */
 
     // 最后一次给某个从节点投票的时间
-    mstime_t voted_time;      /* Last time we voted for a slave of this master */
+    mstime_t voted_time;     /* Last time we voted for a slave of this master */
+
+    // 最后一次从这个节点接收到复制偏移量的时间
+    mstime_t repl_offset_time;  /* Unix time we received offset for this node */
+
+    // 这个节点的复制偏移量
+    long long repl_offset;      /* Last known repl offset for this node. */
 
     // 节点的 IP 地址
     char ip[REDIS_IP_STR_LEN];  /* Latest known IP address of this node */
@@ -391,8 +397,13 @@ typedef struct {
 
     // 如果消息发送者是一个主节点，那么这里记录的是消息发送者的配置纪元
     // 如果消息发送者是一个从节点，那么这里记录的是消息发送者正在复制的主节点的配置纪元
-    uint64_t configEpoch;   /* The config epoch if it's a master, or the last epoch
-                               advertised by its master if it is a slave. */
+    uint64_t configEpoch;   /* The config epoch if it's a master, or the last
+                               epoch advertised by its master if it is a
+                               slave. */
+
+    // 节点的复制偏移量
+    uint64_t offset;    /* Master replication offset if node is a master or
+                           processed replication offset if node is a slave. */
 
     // 消息发送者的名字（ID）
     char sender[REDIS_CLUSTER_NAMELEN]; /* Name of the sender node */
@@ -425,7 +436,7 @@ typedef struct {
 
 #define CLUSTERMSG_MIN_LEN (sizeof(clusterMsg)-sizeof(union clusterMsgData))
 
-/* ----------------------- API exported outside cluster.c ------------------------- */
+/* ---------------------- API exported outside cluster.c -------------------- */
 clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, int *ask);
 
 #endif /* __REDIS_CLUSTER_H */

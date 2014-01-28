@@ -535,6 +535,8 @@ clusterNode *createClusterNode(char *nodename, int flags) {
     node->port = 0;
     node->fail_reports = listCreate();
     node->voted_time = 0;
+    node->repl_offset_time = 0;
+    node->repl_offset = 0;
     listSetFreeMethod(node->fail_reports,zfree);
 
     return node;
@@ -2325,7 +2327,8 @@ void clusterBroadcastMessage(void *buf, size_t len) {
 // 构建信息
 void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
     int totlen = 0;
-    clusterNode *master;
+    uint64_t offset;
+    clusterNode *master, *myself = server.cluster->myself;
 
     /* If this node is a master, we send its slots bitmap and configEpoch.
      *
@@ -2333,17 +2336,15 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
      *
      * If this node is a slave we send the master's information instead (the
      * node is flagged as slave so the receiver knows that it is NOT really
-     * in charge for this slots. 
-     *
+     * in charge for this slots.
      * 如果这是一个从节点，
      * 那么发送这个节点的主节点的槽 bitmap 和配置纪元。
      *
      * 因为接收信息的节点通过标识可以知道这个节点是一个从节点，
      * 所以接收信息的节点不会将从节点错认作是主节点。
      */
-    master = (server.cluster->myself->flags & REDIS_NODE_SLAVE &&
-              server.cluster->myself->slaveof) ?
-              server.cluster->myself->slaveof : server.cluster->myself;
+    master = (myself->flags & REDIS_NODE_SLAVE && myself->slaveof) ?
+              myself->slaveof : myself;
 
     // 清零信息头
     memset(hdr,0,sizeof(*hdr));
@@ -2352,24 +2353,23 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
     hdr->type = htons(type);
 
     // 设置信息发送者
-    memcpy(hdr->sender,server.cluster->myself->name,REDIS_CLUSTER_NAMELEN);
+    memcpy(hdr->sender,myself->name,REDIS_CLUSTER_NAMELEN);
 
     // 设置当前节点负责的槽
     memcpy(hdr->myslots,master->slots,sizeof(hdr->myslots));
 
     // 清零 slaveof 域
     memset(hdr->slaveof,0,REDIS_CLUSTER_NAMELEN);
+
     // 如果节点是从节点的话，那么设置 slaveof 域
-    if (server.cluster->myself->slaveof != NULL) {
-        memcpy(hdr->slaveof,server.cluster->myself->slaveof->name,
-                                    REDIS_CLUSTER_NAMELEN);
-    }
+    if (myself->slaveof != NULL)
+        memcpy(hdr->slaveof,myself->slaveof->name, REDIS_CLUSTER_NAMELEN);
 
     // 设置端口号
     hdr->port = htons(server.port);
 
     // 设置标识
-    hdr->flags = htons(server.cluster->myself->flags);
+    hdr->flags = htons(myself->flags);
 
     // 设置状态
     hdr->state = server.cluster->state;
@@ -2380,6 +2380,22 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
     // 设置主节点当前配置纪元
     hdr->configEpoch = htonu64(master->configEpoch);
 
+    /* Set the replication offset. */
+    // 设置复制偏移量
+    if (myself->flags & REDIS_NODE_SLAVE) {
+        if (server.master)
+            offset = server.master->reploff;
+        else if (server.cached_master)
+            offset = server.cached_master->reploff;
+        else
+            offset = 0;
+    } else {
+        offset = server.master_repl_offset;
+    }
+    hdr->offset = htonu64(offset);
+
+    /* Compute the message length for certain messages. For other messages
+     * this is up to the caller. */
     // 计算信息的长度
     if (type == CLUSTERMSG_TYPE_FAIL) {
         totlen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
