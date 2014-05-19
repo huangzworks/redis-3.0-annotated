@@ -45,8 +45,7 @@ robj *createObject(int type, void *ptr) {
     o->refcount = 1;
 
     /* Set the LRU to the current lruclock (minutes resolution). */
-    o->lru = server.lruclock;
-
+    o->lru = LRU_CLOCK();
     return o;
 }
 
@@ -72,7 +71,7 @@ robj *createEmbeddedStringObject(char *ptr, size_t len) {
     o->encoding = REDIS_ENCODING_EMBSTR;
     o->ptr = sh+1;
     o->refcount = 1;
-    o->lru = server.lruclock;
+    o->lru = LRU_CLOCK();
 
     sh->len = len;
     sh->free = 0;
@@ -87,11 +86,11 @@ robj *createEmbeddedStringObject(char *ptr, size_t len) {
 
 /* Create a string object with EMBSTR encoding if it is smaller than
  * REIDS_ENCODING_EMBSTR_SIZE_LIMIT, otherwise the RAW encoding is
- * used. */
-// 如果输入字符串的长度小于 REDIS_ENCODING_EMBSTR_SIZE_LIMIT
-// 那么创建一个 EMBSTR 编码的字符对象
-// 否则创建一个 RAW 编码的字符对象
-#define REDIS_ENCODING_EMBSTR_SIZE_LIMIT 32
+ * used.
+ *
+ * The current limit of 39 is chosen so that the biggest string object
+ * we allocate as EMBSTR will still fit into the 64 byte arena of jemalloc. */
+#define REDIS_ENCODING_EMBSTR_SIZE_LIMIT 39
 robj *createStringObject(char *ptr, size_t len) {
     if (len <= REDIS_ENCODING_EMBSTR_SIZE_LIMIT)
         return createEmbeddedStringObject(ptr,len);
@@ -527,79 +526,76 @@ robj *tryObjectEncoding(robj *o) {
     sds s = o->ptr;
     size_t len;
 
-    // 对象已经编码过，直接返回
-    if (o->encoding == REDIS_ENCODING_INT)
-        return o; /* Already encoded */
+    /* Make sure this is a string object, the only type we encode
+     * in this function. Other types use encoded memory efficient
+     * representations but are handled by the commands implementing
+     * the type. */
+    redisAssertWithInfo(NULL,o,o->type == REDIS_STRING);
+
+    /* We try some specialized encoding only for objects that are
+     * RAW or EMBSTR encoded, in other words objects that are still
+     * in represented by an actually array of chars. */
+    if (!sdsEncodedObject(o)) return o;
 
     /* It's not safe to encode shared objects: shared objects can be shared
-     * everywhere in the "object space" of Redis. Encoded objects can only
-     * appear as "values" (and not, for instance, as keys) */
-    // 不能编码共享对象
+     * everywhere in the "object space" of Redis and may end in places where
+     * they are not handled. We handle them only as values in the keyspace. */
      if (o->refcount > 1) return o;
-
-    /* Currently we try to encode only strings */
-    // 只有字符串对象可以编码
-    redisAssertWithInfo(NULL,o,o->type == REDIS_STRING);
 
     /* Check if we can represent this string as a long integer.
      * Note that we are sure that a string larger than 21 chars is not
-     * representable as a 64 bit integer. */
+     * representable as a 32 nor 64 bit integer. */
     len = sdslen(s);
-    if (len > 21 || !string2l(s,len,&value)) {
-        /* Integer encoding not possible. Check if we can use EMBSTR. */
-        if (sdslen(s) <= REDIS_ENCODING_EMBSTR_SIZE_LIMIT) {
-            robj *emb = createEmbeddedStringObject(s,sdslen(s));
+    if (len <= 21 && string2l(s,len,&value)) {
+        /* This object is encodable as a long. Try to use a shared object.
+         * Note that we avoid using shared integers when maxmemory is used
+         * because every object needs to have a private LRU field for the LRU
+         * algorithm to work well. */
+        if (server.maxmemory == 0 &&
+            value >= 0 &&
+            value < REDIS_SHARED_INTEGERS)
+        {
             decrRefCount(o);
-            return emb;
+            incrRefCount(shared.integers[value]);
+            return shared.integers[value];
         } else {
-            /* We can't encode the object...
-             *
-             * Do the last try, and at least optimize the SDS string inside
-             * the string object to require little space, in case there
-             * is more than 10% of free space at the end of the SDS string.
-             *
-             * We do that only for relatively large strings as this branch
-             * is only entered if the length of the string is greater than
-             * REDIS_ENCODING_EMBSTR_SIZE_LIMIT. */
-            if (o->encoding == REDIS_ENCODING_RAW &&
-                sdsavail(s) > len/10)
-            {
-                o->ptr = sdsRemoveFreeSpace(o->ptr);
-            }
-            /* Return the original object. */
+            if (o->encoding == REDIS_ENCODING_RAW) sdsfree(o->ptr);
+            o->encoding = REDIS_ENCODING_INT;
+            o->ptr = (void*) value;
             return o;
         }
     }
 
-    /* Ok, this object can be encoded...
-     *
-     * 好的，这个对象可以被编码
-     *
-     * Can I use a shared object? Only if the object is inside a given range
-     *
-     * 先检查对象能否表示为共享对象。
-     *
-     * Note that we also avoid using shared integers when maxmemory is used
-     * because every object needs to have a private LRU field for the LRU
-     * algorithm to work well. 
-     *
-     * 但 maxmemory 启用时，Redis 不使用共享对象来表示整数，
-     * 因为 maxmemory 要求每个对象都需要有自己的 LRU 域，这样 LRU 算法才能运行。
-     */
-    if (server.maxmemory == 0 && value >= 0 && value < REDIS_SHARED_INTEGERS) {
-        // 释放对象
+    /* If the string is small and is still RAW encoded,
+     * try the EMBSTR encoding which is more efficient.
+     * In this representation the object and the SDS string are allocated
+     * in the same chunk of memory to save space and cache misses. */
+    if (len <= REDIS_ENCODING_EMBSTR_SIZE_LIMIT) {
+        robj *emb;
+
+        if (o->encoding == REDIS_ENCODING_EMBSTR) return o;
+        emb = createEmbeddedStringObject(s,sdslen(s));
         decrRefCount(o);
-        // 增加共享对象的引用计数
-        incrRefCount(shared.integers[value]);
-        // 返回共享对象
-        return shared.integers[value];
-    } else {
-        if (o->encoding == REDIS_ENCODING_RAW) sdsfree(o->ptr);
-        o->encoding = REDIS_ENCODING_INT;
-        o->ptr = (void*) value;
-        // 返回新对象
-        return o;
+        return emb;
     }
+
+    /* We can't encode the object...
+     *
+     * Do the last try, and at least optimize the SDS string inside
+     * the string object to require little space, in case there
+     * is more than 10% of free space at the end of the SDS string.
+     *
+     * We do that only for relatively large strings as this branch
+     * is only entered if the length of the string is greater than
+     * REDIS_ENCODING_EMBSTR_SIZE_LIMIT. */
+    if (o->encoding == REDIS_ENCODING_RAW &&
+        sdsavail(s) > len/10)
+    {
+        o->ptr = sdsRemoveFreeSpace(o->ptr);
+    }
+
+    /* Return the original object. */
+    return o;
 }
 
 /* Get a decoded version of an encoded object (returned as a new object).
@@ -1000,28 +996,22 @@ char *strEncoding(int encoding) {
     }
 }
 
-/* Given an object returns the min number of seconds the object was never
- * requested, using an approximated LRU algorithm. 
- *
- * 以秒为单位返回对象的空闲时长。
- *
- * 时长的计算使用的是近似 LRU 算法。
- */
-unsigned long estimateObjectIdleTime(robj *o) {
-
-    if (server.lruclock >= o->lru) {
-        return (server.lruclock - o->lru) * REDIS_LRU_CLOCK_RESOLUTION;
-
+/* Given an object returns the min number of milliseconds the object was never
+ * requested, using an approximated LRU algorithm. */
+unsigned long long estimateObjectIdleTime(robj *o) {
+    unsigned long long lruclock = LRU_CLOCK();
+    if (lruclock >= o->lru) {
+        return (lruclock - o->lru) * REDIS_LRU_CLOCK_RESOLUTION;
     } else {
-        return ((REDIS_LRU_CLOCK_MAX - o->lru) + server.lruclock) *
+        return (lruclock + (REDIS_LRU_CLOCK_MAX - o->lru)) *
                     REDIS_LRU_CLOCK_RESOLUTION;
     }
 }
 
-/* This is a helper function for the DEBUG command. We need to lookup keys
+/* This is a helper function for the OBJECT command. We need to lookup keys
  * without any modification of LRU or other parameters.
  *
- * DEBUG 命令的辅助函数，用于在不修改 LRU 时间的情况下，尝试获取 key 对象
+ * OBJECT 命令的辅助函数，用于在不修改 LRU 时间的情况下，尝试获取 key 对象
  */
 robj *objectCommandLookup(redisClient *c, robj *key) {
     dictEntry *de;
@@ -1063,8 +1053,7 @@ void objectCommand(redisClient *c) {
     } else if (!strcasecmp(c->argv[1]->ptr,"idletime") && c->argc == 3) {
         if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.nullbulk))
                 == NULL) return;
-        addReplyLongLong(c,estimateObjectIdleTime(o));
-
+        addReplyLongLong(c,estimateObjectIdleTime(o)/1000);
     } else {
         addReplyError(c,"Syntax error. Try OBJECT (refcount|encoding|idletime)");
     }

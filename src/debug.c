@@ -292,7 +292,7 @@ void debugCommand(redisClient *c) {
         addReplyStatusFormat(c,
             "Value at:%p refcount:%d "
             "encoding:%s serializedlength:%lld "
-            "lru:%d lru_seconds_idle:%lu",
+            "lru:%d lru_seconds_idle:%llu",
             (void*)val, val->refcount,
             strenc, (long long) rdbSavedObjectLen(val),
             val->lru, estimateObjectIdleTime(val));
@@ -326,6 +326,7 @@ void debugCommand(redisClient *c) {
 
         if (getLongFromObjectOrReply(c, c->argv[2], &keys, NULL) != REDIS_OK)
             return;
+        dictExpand(c->db->dict,keys);
         for (j = 0; j < keys; j++) {
             snprintf(buf,sizeof(buf),"key:%lu",j);
             key = createStringObject(buf,strlen(buf));
@@ -363,6 +364,31 @@ void debugCommand(redisClient *c) {
     {
         server.active_expire_enabled = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"cmdkeys") && c->argc >= 3) {
+        struct redisCommand *cmd = lookupCommand(c->argv[2]->ptr);
+        int *keys, numkeys, j;
+
+        if (!cmd) {
+            addReplyError(c,"Invalid command specified");
+            return;
+        } else if ((cmd->arity > 0 && cmd->arity != c->argc-2) ||
+                   ((c->argc-2) < -cmd->arity))
+        {
+            addReplyError(c,"Invalid number of arguments specified for command");
+            return;
+        }
+
+        keys = getKeysFromCommand(cmd,c->argv+2,c->argc-2,&numkeys);
+        addReplyMultiBulkLen(c,numkeys);
+        for (j = 0; j < numkeys; j++) addReplyBulk(c,c->argv[keys[j]+2]);
+        getKeysFreeResult(keys);
+    } else if (!strcasecmp(c->argv[1]->ptr,"error") && c->argc == 3) {
+        sds errstr = sdsnewlen("-",1);
+
+        errstr = sdscatsds(errstr,c->argv[2]->ptr);
+        errstr = sdsmapchars(errstr,"\n\r","  ",2); /* no newlines in errors. */
+        errstr = sdscatlen(errstr,"\r\n",2);
+        addReplySds(c,errstr);
     } else {
         addReplyErrorFormat(c, "Unknown DEBUG subcommand or wrong number of arguments for '%s'",
             (char*)c->argv[1]->ptr);
@@ -676,7 +702,7 @@ void logCurrentClient(void) {
     int j;
 
     redisLog(REDIS_WARNING, "--- CURRENT CLIENT INFO");
-    client = getClientInfoString(cc);
+    client = catClientInfoString(sdsempty(),cc);
     redisLog(REDIS_WARNING,"client: %s", client);
     sdsfree(client);
     for (j = 0; j < cc->argc; j++) {

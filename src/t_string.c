@@ -303,16 +303,7 @@ void setrangeCommand(redisClient *c) {
             return;
 
         /* Create a copy when the object is shared or encoded. */
-        // 如果值对象是共享对象，或者已经被编码的话
-        // 那么创建值对象的一个副本，并用副本对象替换原对象
-        if (o->refcount != 1 || o->encoding != REDIS_ENCODING_RAW) {
-            robj *decoded = getDecodedObject(o);
-            // 创建副本
-            o = createRawStringObject(decoded->ptr, sdslen(decoded->ptr));
-            decrRefCount(decoded);
-            // 用新对象覆盖原有对象
-            dbOverwrite(c->db,c->argv[1],o);
-        }
+        o = dbUnshareStringValue(c->db,c->argv[1],o);
     }
 
     // 这里的 sdslen(value) > 0 其实可以去掉
@@ -618,18 +609,9 @@ void appendCommand(redisClient *c) {
         if (checkStringLength(c,totlen) != REDIS_OK)
             return;
 
-        /* If the object is shared or encoded, we have to make a copy */
-        // 如果对象是共享对象，或者是已编码对象，
-        // 那么创建一个这个对象的副本，并用这个副本替换原来的对象
-        if (o->refcount != 1 || o->encoding != REDIS_ENCODING_RAW) {
-            robj *decoded = getDecodedObject(o);
-            o = createRawStringObject(decoded->ptr, sdslen(decoded->ptr));
-            decrRefCount(decoded);
-            dbOverwrite(c->db,c->argv[1],o);
-        }
-
         /* Append the value */
         // 执行追加操作
+        o = dbUnshareStringValue(c->db,c->argv[1],o);
         o->ptr = sdscatlen(o->ptr,append->ptr,sdslen(append->ptr));
         totlen = sdslen(o->ptr);
     }

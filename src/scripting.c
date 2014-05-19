@@ -230,13 +230,19 @@ void luaSortArray(lua_State *lua) {
  *
  * 执行出错时返回 1 
  */
+#define LUA_CMD_OBJCACHE_SIZE 32
+#define LUA_CMD_OBJCACHE_MAX_LEN 64
 int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     int j, argc = lua_gettop(lua);
     struct redisCommand *cmd;
-    robj **argv;
-    // 指向伪客户端
     redisClient *c = server.lua_client;
     sds reply;
+
+    /* Cached across calls. */
+    static robj **argv = NULL;
+    static int argv_size = 0;
+    static robj *cached_objects[LUA_CMD_OBJCACHE_SIZE];
+    static int cached_objects_len[LUA_CMD_OBJCACHE_SIZE];
 
     /* Require at least one argument */
     // 命令参数检查（命令本身是 argv[0]）
@@ -248,11 +254,33 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
 
     /* Build the arguments vector */
     // 构建参数数组
-    argv = zmalloc(sizeof(robj*)*argc);
+    if (!argv) {
+        argv = zmalloc(sizeof(robj*)*argc);
+    } else if (argv_size < argc) {
+        argv = zrealloc(argv,sizeof(robj*)*argc);
+        argv_size = argc;
+    }
+
     for (j = 0; j < argc; j++) {
-        if (!lua_isstring(lua,j+1)) break;
-        argv[j] = createStringObject((char*)lua_tostring(lua,j+1),
-                                     lua_strlen(lua,j+1));
+        char *obj_s;
+        size_t obj_len;
+
+        obj_s = (char*)lua_tolstring(lua,j+1,&obj_len);
+        if (obj_s == NULL) break; /* Not a string. */
+
+        /* Try to use a cached object. */
+        if (cached_objects[j] && cached_objects_len[j] >= obj_len) {
+            char *s = cached_objects[j]->ptr;
+            struct sdshdr *sh = (void*)(s-(sizeof(struct sdshdr)));
+
+            argv[j] = cached_objects[j];
+            cached_objects[j] = NULL;
+            memcpy(s,obj_s,obj_len+1);
+            sh->free += sh->len - obj_len;
+            sh->len = obj_len;
+        } else {
+            argv[j] = createStringObject(obj_s, obj_len);
+        }
     }
     
     /* Check if one of the arguments passed by the Lua script
@@ -267,7 +295,6 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
             decrRefCount(argv[j]);
             j--;
         }
-        zfree(argv);
         luaPushError(lua,
             "Lua redis() command arguments must be strings or integers");
         return 1;
@@ -371,18 +398,21 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
      *
      * 首先要做的就是为客户端输出缓存中创建一个字符串
      */
-    reply = sdsempty();
-    // 先读取输出 buf 中的内容
-    if (c->bufpos) {
-        reply = sdscatlen(reply,c->buf,c->bufpos);
+    if (listLength(c->reply) == 0 && c->bufpos < REDIS_REPLY_CHUNK_BYTES) {
+        /* This is a fast path for the common case of a reply inside the
+         * client static buffer. Don't create an SDS string but just use
+         * the client buffer directly. */
+        c->buf[c->bufpos] = '\0';
+        reply = c->buf;
         c->bufpos = 0;
-    }
-    // 再读取输出列表中的内容
-    while(listLength(c->reply)) {
-        robj *o = listNodeValue(listFirst(c->reply));
-
-        reply = sdscatlen(reply,o->ptr,sdslen(o->ptr));
-        listDelNode(c->reply,listFirst(c->reply));
+    } else {
+        reply = sdsnewlen(c->buf,c->bufpos);
+        c->bufpos = 0;
+        while(listLength(c->reply)) {
+            robj *o = listNodeValue(listFirst(c->reply));
+            reply = sdscatlen(reply,o->ptr,sdslen(o->ptr));
+            listDelNode(c->reply,listFirst(c->reply));
+        }
     }
 
     // 检测执行的命令是否出错
@@ -404,18 +434,38 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
             luaSortArray(lua);
     }
 
-    // 释放回复
-    sdsfree(reply);
-
+    if (reply != c->buf) sdsfree(reply);
     c->reply_bytes = 0;
 
 cleanup:
     /* Clean up. Command code may have changed argv/argc so we use the
      * argv/argc of the client instead of the local variables. */
-    // 释放所有参数
-    for (j = 0; j < c->argc; j++)
-        decrRefCount(c->argv[j]);
-    zfree(c->argv);
+    for (j = 0; j < c->argc; j++) {
+        robj *o = c->argv[j];
+
+        /* Try to cache the object in the cached_objects array.
+         * The object must be small, SDS-encoded, and with refcount = 1
+         * (we must be the only owner) for us to cache it. */
+        if (j < LUA_CMD_OBJCACHE_SIZE &&
+            o->refcount == 1 &&
+            (o->encoding == REDIS_ENCODING_RAW ||
+             o->encoding == REDIS_ENCODING_EMBSTR) &&
+            sdslen(o->ptr) <= LUA_CMD_OBJCACHE_MAX_LEN)
+        {
+            struct sdshdr *sh = (void*)(((char*)(o->ptr))-(sizeof(struct sdshdr)));
+
+            if (cached_objects[j]) decrRefCount(cached_objects[j]);
+            cached_objects[j] = o;
+            cached_objects_len[j] = sh->free + sh->len;
+        } else {
+            decrRefCount(o);
+        }
+    }
+
+    if (c->argv != argv) {
+        zfree(c->argv);
+        argv = NULL;
+    }
 
     // 返回错误
     if (raise_error) {
@@ -529,8 +579,7 @@ void luaMaskCountHook(lua_State *lua, lua_Debug *ar) {
     REDIS_NOTUSED(lua);
 
     // 计算已执行时间
-    elapsed = (ustime()/1000) - server.lua_time_start;
-
+    elapsed = mstime() - server.lua_time_start;
     // 执行已超时
     if (elapsed >= server.lua_time_limit && server.lua_timedout == 0) {
 
@@ -551,9 +600,7 @@ void luaMaskCountHook(lua_State *lua, lua_Debug *ar) {
     }
 
     // 在脚本上下文中，启动文件事件处理（等待 SCRIPT KILL 或 SHUTDOWN NOSAVE）
-    if (server.lua_timedout)
-        aeProcessEvents(server.el, AE_FILE_EVENTS|AE_DONT_WAIT);
-
+    if (server.lua_timedout) processEventsWhileBlocked();
     // 如果接到 SCRIPT KILL ，那么杀死脚本
     if (server.lua_kill) {
         redisLog(REDIS_WARNING,"Lua script killed by user with SCRIPT KILL.");
@@ -1122,8 +1169,12 @@ void evalGenericCommand(redisClient *c, int evalsha) {
         int j;
         char *sha = c->argv[1]->ptr;
 
+        /* Convert to lowercase. We don't use tolower since the function
+         * managed to always show up in the profiler output consuming
+         * a non trivial amount of time. */
         for (j = 0; j < 40; j++)
-            funcname[j+2] = tolower(sha[j]);
+            funcname[j+2] = (sha[j] >= 'A' && sha[j] <= 'Z') ?
+                sha[j]+('a'-'A') : sha[j];
         funcname[42] = '\0';
     }
 
@@ -1189,7 +1240,7 @@ void evalGenericCommand(redisClient *c, int evalsha) {
     // 调用客户端
     server.lua_caller = c;
     // 脚本开始时间
-    server.lua_time_start = ustime()/1000;
+    server.lua_time_start = mstime();
     // 是否杀死脚本
     server.lua_kill = 0;
     // 只在开启了时间限制功能的时候，才使用钩子
@@ -1231,8 +1282,22 @@ void evalGenericCommand(redisClient *c, int evalsha) {
     // 所以这里需要更新客户端
     selectDb(c,server.lua_client->db->id); /* set DB ID from Lua client */
 
-    // 执行 1 步渐进式 GC
-    lua_gc(lua,LUA_GCSTEP,1);
+    /* Call the Lua garbage collector from time to time to avoid a
+     * full cycle performed by Lua, which adds too latency.
+     *
+     * The call is performed every LUA_GC_CYCLE_PERIOD executed commands
+     * (and for LUA_GC_CYCLE_PERIOD collection steps) because calling it
+     * for every command uses too much CPU. */
+    #define LUA_GC_CYCLE_PERIOD 50
+    {
+        static long gc_count = 0;
+
+        gc_count++;
+        if (gc_count == LUA_GC_CYCLE_PERIOD) {
+            lua_gc(lua,LUA_GCSTEP,LUA_GC_CYCLE_PERIOD);
+            gc_count = 0;
+        }
+    }
 
     // 检查脚本运行是否出错
     if (err) {
@@ -1291,6 +1356,7 @@ void evalGenericCommand(redisClient *c, int evalsha) {
             rewriteClientCommandArgument(c,0,
                 resetRefCount(createStringObject("EVAL",4)));
             rewriteClientCommandArgument(c,1,script);
+            forceCommandPropagation(c,REDIS_PROPAGATE_REPL|REDIS_PROPAGATE_AOF);
         }
     }
 }

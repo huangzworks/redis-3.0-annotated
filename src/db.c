@@ -63,7 +63,7 @@ robj *lookupKey(redisDb *db, robj *key) {
          * a copy on write madness. */
         // 更新时间信息（只在不存在子进程时执行，防止破坏 copy-on-write 机制）
         if (server.rdb_child_pid == -1 && server.aof_child_pid == -1)
-            val->lru = server.lruclock;
+            val->lru = LRU_CLOCK();
 
         // 返回值
         return val;
@@ -194,8 +194,7 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
  * 如果键不存在，那么函数停止。
  */
 void dbOverwrite(redisDb *db, robj *key, robj *val) {
-
-    struct dictEntry *de = dictFind(db->dict,key->ptr);
+    dictEntry *de = dictFind(db->dict,key->ptr);
     
     // 节点必须存在，否则中止
     redisAssertWithInfo(NULL,key,de != NULL);
@@ -257,7 +256,7 @@ int dbExists(redisDb *db, robj *key) {
  * 这个函数保证被返回的键都是未过期的。
  */
 robj *dbRandomKey(redisDb *db) {
-    struct dictEntry *de;
+    dictEntry *de;
 
     while(1) {
         sds key;
@@ -309,6 +308,44 @@ int dbDelete(redisDb *db, robj *key) {
         // 键不存在
         return 0;
     }
+}
+
+/* Prepare the string object stored at 'key' to be modified destructively
+ * to implement commands like SETBIT or APPEND.
+ *
+ * An object is usually ready to be modified unless one of the two conditions
+ * are true:
+ *
+ * 1) The object 'o' is shared (refcount > 1), we don't want to affect
+ *    other users.
+ * 2) The object encoding is not "RAW".
+ *
+ * If the object is found in one of the above conditions (or both) by the
+ * function, an unshared / not-encoded copy of the string object is stored
+ * at 'key' in the specified 'db'. Otherwise the object 'o' itself is
+ * returned.
+ *
+ * USAGE:
+ *
+ * The object 'o' is what the caller already obtained by looking up 'key'
+ * in 'db', the usage pattern looks like this:
+ *
+ * o = lookupKeyWrite(db,key);
+ * if (checkType(c,o,REDIS_STRING)) return;
+ * o = dbUnshareStringValue(db,key,o);
+ *
+ * At this point the caller is ready to modify the object, for example
+ * using an sdscat() call to append some data, or anything else.
+ */
+robj *dbUnshareStringValue(redisDb *db, robj *key, robj *o) {
+    redisAssert(o->type == REDIS_STRING);
+    if (o->refcount != 1 || o->encoding != REDIS_ENCODING_RAW) {
+        robj *decoded = getDecodedObject(o);
+        o = createRawStringObject(decoded->ptr, sdslen(decoded->ptr));
+        decrRefCount(decoded);
+        dbOverwrite(db,key,o);
+    }
+    return o;
 }
 
 /*
@@ -441,6 +478,9 @@ void delCommand(redisClient *c) {
 
     // 遍历所有输入键
     for (j = 1; j < c->argc; j++) {
+
+        // 先删除过期的键
+        expireIfNeeded(c->db,c->argv[j]);
 
         // 尝试删除键
         if (dbDelete(c->db,c->argv[j])) {
@@ -879,11 +919,13 @@ void shutdownCommand(redisClient *c) {
         }
     }
 
-    /* SHUTDOWN can be called even while the server is in "loading" state.
-     * When this happens we need to make sure no attempt is performed to save
+    /* When SHUTDOWN is called while the server is loading a dataset in
+     * memory we need to make sure no attempt is performed to save
      * the dataset on shutdown (otherwise it could overwrite the current DB
-     * with half-read data). */
-    if (server.loading)
+     * with half-read data).
+     *
+     * Also when in Sentinel mode clear the SAVE flag and force NOSAVE. */
+    if (server.loading || server.sentinel_mode)
         flags = (flags & ~REDIS_SHUTDOWN_SAVE) | REDIS_SHUTDOWN_NOSAVE;
 
     if (prepareForShutdown(flags) == REDIS_OK) exit(0);
@@ -1134,7 +1176,8 @@ void propagateExpire(redisDb *db, robj *key) {
 int expireIfNeeded(redisDb *db, robj *key) {
 
     // 取出键的过期时间
-    long long when = getExpire(db,key);
+    mstime_t when = getExpire(db,key);
+    mstime_t now;
 
     // 没有过期时间
     if (when < 0) return 0; /* No expire for this key */
@@ -1142,6 +1185,13 @@ int expireIfNeeded(redisDb *db, robj *key) {
     /* Don't expire anything while loading. It will be done later. */
     // 如果服务器正在进行载入，那么不进行任何过期检查
     if (server.loading) return 0;
+
+    /* If we are in the context of a Lua script, we claim that time is
+     * blocked to when the Lua script started. This way a key can expire
+     * only the first time it is accessed and not in the middle of the
+     * script execution, making propagation to slaves / AOF consistent.
+     * See issue #1525 on Github for more information. */
+    now = server.lua_caller ? server.lua_time_start : mstime();
 
     /* If we are running in the context of a slave, return ASAP:
      * the slave key expiration is controlled by the master that will
@@ -1155,15 +1205,13 @@ int expireIfNeeded(redisDb *db, robj *key) {
     // 它只返回一个逻辑上正确的返回值
     // 真正的删除操作要等待主节点发来删除命令时才执行
     // 从而保证数据的同步
-    if (server.masterhost != NULL) {
-        return mstime() > when;
-    }
+    if (server.masterhost != NULL) return now > when;
 
     // 运行到这里，表示键带有过期时间，并且服务器为主节点
 
     /* Return when this key has not expired */
     // 如果未过期，返回 0
-    if (mstime() <= when) return 0;
+    if (now <= when) return 0;
 
     /* Delete the key */
     server.stat_expiredkeys++;
@@ -1365,6 +1413,8 @@ void persistCommand(redisClient *c) {
  * API to get key arguments from commands
  * ---------------------------------------------------------------------------*/
 
+/* The base case is to use the keys position as given in the command table
+ * (firstkey, lastkey, step). */
 int *getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, int *numkeys) {
     int j, i = 0, last, *keys;
     REDIS_NOTUSED(argv);
@@ -1384,42 +1434,36 @@ int *getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, in
     return keys;
 }
 
-int *getKeysFromCommand(struct redisCommand *cmd,robj **argv, int argc, int *numkeys, int flags) {
+/* Return all the arguments that are keys in the command passed via argc / argv.
+ *
+ * The command returns the positions of all the key arguments inside the array,
+ * so the actual return value is an heap allocated array of integers. The
+ * length of the array is returned by reference into *numkeys.
+ *
+ * 'cmd' must be point to the corresponding entry into the redisCommand
+ * table, according to the command name in argv[0].
+ *
+ * This function uses the command table if a command-specific helper function
+ * is not required, otherwise it calls the command-specific function. */
+int *getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     if (cmd->getkeys_proc) {
-        return cmd->getkeys_proc(cmd,argv,argc,numkeys,flags);
+        return cmd->getkeys_proc(cmd,argv,argc,numkeys);
     } else {
         return getKeysUsingCommandTable(cmd,argv,argc,numkeys);
     }
 }
 
+/* Free the result of getKeysFromCommand. */
 void getKeysFreeResult(int *result) {
     zfree(result);
 }
 
-int *noPreloadGetKeys(struct redisCommand *cmd,robj **argv, int argc, int *numkeys, int flags) {
-    if (flags & REDIS_GETKEYS_PRELOAD) {
-        *numkeys = 0;
-        return NULL;
-    } else {
-        return getKeysUsingCommandTable(cmd,argv,argc,numkeys);
-    }
-}
-
-int *renameGetKeys(struct redisCommand *cmd,robj **argv, int argc, int *numkeys, int flags) {
-    if (flags & REDIS_GETKEYS_PRELOAD) {
-        int *keys = zmalloc(sizeof(int));
-        *numkeys = 1;
-        keys[0] = 1;
-        return keys;
-    } else {
-        return getKeysUsingCommandTable(cmd,argv,argc,numkeys);
-    }
-}
-
-int *zunionInterGetKeys(struct redisCommand *cmd,robj **argv, int argc, int *numkeys, int flags) {
+/* Helper function to extract keys from following commands:
+ * ZUNIONSTORE <destkey> <num-keys> <key> <key> ... <key> <options>
+ * ZINTERSTORE <destkey> <num-keys> <key> <key> ... <key> <options> */
+int *zunionInterGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     int i, num, *keys;
     REDIS_NOTUSED(cmd);
-    REDIS_NOTUSED(flags);
 
     num = atoi(argv[2]->ptr);
     /* Sanity check. Don't return any key if the command is going to
@@ -1428,8 +1472,89 @@ int *zunionInterGetKeys(struct redisCommand *cmd,robj **argv, int argc, int *num
         *numkeys = 0;
         return NULL;
     }
-    keys = zmalloc(sizeof(int)*num);
+
+    /* Keys in z{union,inter}store come from two places:
+     * argv[1] = storage key,
+     * argv[3...n] = keys to intersect */
+    keys = zmalloc(sizeof(int)*(num+1));
+
+    /* Add all key positions for argv[3...n] to keys[] */
     for (i = 0; i < num; i++) keys[i] = 3+i;
+
+    /* Finally add the argv[1] key position (the storage key target). */
+    keys[num] = 1;
+    *numkeys = num+1;  /* Total keys = {union,inter} keys + storage key */
+    return keys;
+}
+
+/* Helper function to extract keys from the following commands:
+ * EVAL <script> <num-keys> <key> <key> ... <key> [more stuff]
+ * EVALSHA <script> <num-keys> <key> <key> ... <key> [more stuff] */
+int *evalGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
+    int i, num, *keys;
+    REDIS_NOTUSED(cmd);
+
+    num = atoi(argv[2]->ptr);
+    /* Sanity check. Don't return any key if the command is going to
+     * reply with syntax error. */
+    if (num > (argc-3)) {
+        *numkeys = 0;
+        return NULL;
+    }
+
+    keys = zmalloc(sizeof(int)*num);
+    *numkeys = num;
+
+    /* Add all key positions for argv[3...n] to keys[] */
+    for (i = 0; i < num; i++) keys[i] = 3+i;
+
+    return keys;
+}
+
+/* Helper function to extract keys from the SORT command.
+ *
+ * SORT <sort-key> ... STORE <store-key> ...
+ *
+ * The first argument of SORT is always a key, however a list of options
+ * follow in SQL-alike style. Here we parse just the minimum in order to
+ * correctly identify keys in the "STORE" option. */
+int *sortGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
+    int i, j, num, *keys;
+    REDIS_NOTUSED(cmd);
+
+    num = 0;
+    keys = zmalloc(sizeof(int)*2); /* Alloc 2 places for the worst case. */
+
+    keys[num++] = 1; /* <sort-key> is always present. */
+
+    /* Search for STORE option. By default we consider options to don't
+     * have arguments, so if we find an unknown option name we scan the
+     * next. However there are options with 1 or 2 arguments, so we
+     * provide a list here in order to skip the right number of args. */
+    struct {
+        char *name;
+        int skip;
+    } skiplist[] = {
+        {"limit", 2},
+        {"get", 1},
+        {"by", 1},
+        {NULL, 0} /* End of elements. */
+    };
+
+    for (i = 2; i < argc; i++) {
+        for (j = 0; skiplist[j].name != NULL; j++) {
+            if (!strcasecmp(argv[i]->ptr,skiplist[j].name)) {
+                i += skiplist[j].skip;
+                break;
+            } else if (!strcasecmp(argv[i]->ptr,"store") && i+1 < argc) {
+                /* Note: we don't increment "num" here and continue the loop
+                 * to be sure to process the *last* "STORE" option if multiple
+                 * ones are provided. This is same behavior as SORT. */
+                keys[num] = i+1; /* <store-key> */
+                break;
+            }
+        }
+    }
     *numkeys = num;
     return keys;
 }
@@ -1472,9 +1597,9 @@ unsigned int getKeysInSlot(unsigned int hashslot, robj **keys, unsigned int coun
 
     range.min = range.max = hashslot;
     range.minex = range.maxex = 0;
-    
+
     // 定位到第一个属于指定 slot 的键上面
-    n = zslFirstInRange(server.cluster->slots_to_keys, range);
+    n = zslFirstInRange(server.cluster->slots_to_keys, &range);
     // 遍历跳跃表，并保存属于指定 slot 的键
     // n && n->score 检查当前键是否属于指定 slot
     // && count-- 用来计数
@@ -1482,6 +1607,28 @@ unsigned int getKeysInSlot(unsigned int hashslot, robj **keys, unsigned int coun
         // 记录键
         keys[j++] = n->obj;
         n = n->level[0].forward;
+    }
+    return j;
+}
+
+/* Remove all the keys in the specified hash slot.
+ * The number of removed items is returned. */
+unsigned int delKeysInSlot(unsigned int hashslot) {
+    zskiplistNode *n;
+    zrangespec range;
+    int j = 0;
+
+    range.min = range.max = hashslot;
+    range.minex = range.maxex = 0;
+
+    n = zslFirstInRange(server.cluster->slots_to_keys, &range);
+    while(n && n->score == hashslot) {
+        robj *key = n->obj;
+        n = n->level[0].forward; /* Go to the next item before freeing it. */
+        incrRefCount(key); /* Protect the object while freeing it. */
+        dbDelete(&server.db[0],key);
+        decrRefCount(key);
+        j++;
     }
     return j;
 }
@@ -1498,7 +1645,7 @@ unsigned int countKeysInSlot(unsigned int hashslot) {
 
     /* Find first element in range */
     // 定位到第一个在指定 slot 上的键
-    zn = zslFirstInRange(zsl, range);
+    zn = zslFirstInRange(zsl, &range);
 
     /* Use rank of first element, if any, to determine preliminary count */
     // 使用第一个指定 slot 键的排位减去最后一个指定 slot 键的排位
@@ -1513,7 +1660,7 @@ unsigned int countKeysInSlot(unsigned int hashslot) {
 
         /* Find last element in range */
         // 获取最后一个指定 slot 的键
-        zn = zslLastInRange(zsl, range);
+        zn = zslLastInRange(zsl, &range);
 
         /* Use rank of last element, if any, to determine the actual count */
         // 最后一个键存在

@@ -311,8 +311,21 @@ start_server {tags {"scripting"}} {
         r config set slave-read-only yes
         r slaveof 127.0.0.1 0
         r debug loadaof
-        r get foo
+        set res [r get foo]
+        r slaveof no one
+        set res
     } {102}
+
+    test {We can call scripts rewriting client->argv from Lua} {
+        r del myset
+        r sadd myset a b c
+        r mset a 1 b 2 c 3 d 4
+        assert {[r spop myset] ne {}}
+        assert {[r spop myset] ne {}}
+        assert {[r spop myset] ne {}}
+        assert {[r mget a b c d] eq {1 2 3 4}}
+        assert {[r spop myset] eq {}}
+    }
 }
 
 # Start a new server since the last test in this stanza will kill the
@@ -326,6 +339,7 @@ start_server {tags {"scripting"}} {
         catch {r ping} e
         assert_match {BUSY*} $e
         r script kill
+        after 200 ; # Give some time to Lua to call the hook again...
         assert_equal [r ping] "PONG"
     }
 
@@ -417,5 +431,17 @@ start_server {tags {"scripting repl"}} {
             }
             set res
         } {a 1}
+
+        test {EVALSHA replication when first call is readonly} {
+            r del x
+            r eval {if tonumber(KEYS[1]) > 0 then redis.call('incr', 'x') end} 1 0
+            r evalsha 38fe3ddf5284a1d48f37f824b4c4e826879f3cb9 1 0
+            r evalsha 38fe3ddf5284a1d48f37f824b4c4e826879f3cb9 1 1
+            wait_for_condition 50 100 {
+                [r -1 get x] eq {1}
+            } else {
+                fail "Expected 1 in x, but value is '[r -1 get x]'"
+            }
+        }
     }
 }

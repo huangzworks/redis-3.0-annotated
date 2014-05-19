@@ -312,7 +312,6 @@ void replicationFeedMonitors(redisClient *c, list *monitors, int dictid, robj **
     int j;
     sds cmdrepr = sdsnew("+");
     robj *cmdobj;
-    char peerid[REDIS_PEER_ID_LEN];
     struct timeval tv;
 
     // 获取时间戳
@@ -323,8 +322,7 @@ void replicationFeedMonitors(redisClient *c, list *monitors, int dictid, robj **
     } else if (c->flags & REDIS_UNIX_SOCKET) {
         cmdrepr = sdscatprintf(cmdrepr,"[%d unix:%s] ",dictid,server.unixsocket);
     } else {
-        getClientPeerId(c,peerid,sizeof(peerid));
-        cmdrepr = sdscatprintf(cmdrepr,"[%d %s] ",dictid,peerid);
+        cmdrepr = sdscatprintf(cmdrepr,"[%d %s] ",dictid,getClientPeerId(c));
     }
 
     // 获取命令和参数
@@ -774,9 +772,11 @@ void sendBulkToSlave(aeEventLoop *el, int fd, void *privdata, int mask) {
     }
     // 写入数据到 slave
     if ((nwritten = write(fd,buf,buflen)) == -1) {
-        redisLog(REDIS_VERBOSE,"Write error sending DB to slave: %s",
-            strerror(errno));
-        freeClient(slave);
+        if (errno != EAGAIN) {
+            redisLog(REDIS_WARNING,"Write error sending DB to slave: %s",
+                strerror(errno));
+            freeClient(slave);
+        }
         return;
     }
 
@@ -798,6 +798,7 @@ void sendBulkToSlave(aeEventLoop *el, int fd, void *privdata, int mask) {
         // 将保存并发送 RDB 期间的回复全部发送给从服务器
         if (aeCreateFileEvent(server.el, slave->fd, AE_WRITABLE,
             sendReplyToClient, slave) == AE_ERR) {
+            redisLog(REDIS_WARNING,"Unable to register writable event for slave bulk transfer: %s", strerror(errno));
             freeClient(slave);
             return;
         }
@@ -1781,6 +1782,12 @@ void replicationCacheMaster(redisClient *c) {
     /* Set fd to -1 so that we can safely call freeClient(c) later. */
     c->fd = -1;
 
+    /* Invalidate the Peer ID cache. */
+    if (c->peerid) {
+        sdsfree(c->peerid);
+        c->peerid = NULL;
+    }
+
     /* Caching the master happens instead of the actual freeClient() call,
      * so make sure to adjust the replication state. This function will
      * also set server.master to NULL. */
@@ -2153,6 +2160,26 @@ void processClientsWaitingReplicas(void) {
             }
         }
     }
+}
+
+/* Return the slave replication offset for this instance, that is
+ * the offset for which we already processed the master replication stream. */
+long long replicationGetSlaveOffset(void) {
+    long long offset = 0;
+
+    if (server.masterhost != NULL) {
+        if (server.master) {
+            offset = server.master->reploff;
+        } else if (server.cached_master) {
+            offset = server.cached_master->reploff;
+        }
+    }
+    /* offset may be -1 when the master does not support it at all, however
+     * this function is designed to return an offset that can express the
+     * amount of data processed by the master, so we return a positive
+     * integer. */
+    if (offset < 0) offset = 0;
+    return offset;
 }
 
 /* --------------------------- REPLICATION CRON  ---------------------------- */

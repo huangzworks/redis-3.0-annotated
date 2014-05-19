@@ -615,7 +615,7 @@ int rdbSaveDoubleValue(rio *rdb, double val) {
         double min = -4503599627370495; /* (2^52)-1 */
         double max = 4503599627370496; /* -(2^52) */
         if (val > min && val < max && val == ((double)((long long)val)))
-            ll2string((char*)buf+1,sizeof(buf),(long long)val);
+            ll2string((char*)buf+1,sizeof(buf)-1,(long long)val);
         else
 #endif
             snprintf((char*)buf+1,sizeof(buf)-1,"%.17g",val);
@@ -632,7 +632,7 @@ int rdbSaveDoubleValue(rio *rdb, double val) {
  * 载入字符串表示的双精度浮点数
  */
 int rdbLoadDoubleValue(rio *rdb, double *val) {
-    char buf[128];
+    char buf[256];
     unsigned char len;
 
     // 载入字符串长度
@@ -1020,13 +1020,11 @@ int rdbSave(char *filename) {
     memrev64ifbe(&cksum);
     rioWrite(&rdb,&cksum,8);
 
-    /* Make sure data will not remain on the OS's output buffers 
-     *
-     * 冲洗缓存，确保数据已写入磁盘
-     */
-    fflush(fp);
-    fsync(fileno(fp));
-    fclose(fp);
+    /* Make sure data will not remain on the OS's output buffers */
+    // 冲洗缓存，确保数据已写入磁盘
+    if (fflush(fp) == EOF) goto werr;
+    if (fsync(fileno(fp)) == -1) goto werr;
+    if (fclose(fp) == EOF) goto werr;
 
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. 
@@ -1599,10 +1597,14 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
     if (server.loading_process_events_interval_bytes &&
         (r->processed_bytes + len)/server.loading_process_events_interval_bytes > r->processed_bytes/server.loading_process_events_interval_bytes)
     {
+        /* The DB can take some non trivial amount of time to load. Update
+         * our cached time since it is used to create and update the last
+         * interaction time with clients and for other important things. */
+        updateCachedTime();
         if (server.masterhost && server.repl_state == REDIS_REPL_TRANSFER)
             replicationSendNewlineToMaster();
         loadingProgress(r->processed_bytes);
-        aeProcessEvents(server.el, AE_FILE_EVENTS|AE_DONT_WAIT);
+        processEventsWhileBlocked();
     }
 }
 

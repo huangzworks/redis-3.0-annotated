@@ -354,6 +354,7 @@ int startAppendOnly(void) {
  * 不过，如果 force 为 1 的话，那么不管后台是否正在 fsync ，
  * 程序都直接进行写入。
  */
+#define AOF_WRITE_LOG_ERROR_RATE 30 /* Seconds between errors logging. */
 void flushAppendOnlyFile(int force) {
     ssize_t nwritten;
     int sync_in_progress = 0;
@@ -439,39 +440,80 @@ void flushAppendOnlyFile(int force) {
      */
     nwritten = write(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
     if (nwritten != (signed)sdslen(server.aof_buf)) {
-        /* Ooops, we are in troubles. The best thing to do for now is
-         * aborting instead of giving the illusion that everything is
-         * working as expected. 
-         *
-         * 糟糕了，成功写入的字节数不等于缓存的字节数
-         * 可能是磁盘满了 0 <= nwritten < sdslen(server.aof_buf) ，
-         * 也可能是写入失败 nwritten == -1
-         *
-         * 立即停机，向用户报告错误
-         */
+
+        static time_t last_write_error_log = 0;
+        int can_log = 0;
+
+        /* Limit logging rate to 1 line per AOF_WRITE_LOG_ERROR_RATE seconds. */
+        // 将日志的记录频率限制在每行 AOF_WRITE_LOG_ERROR_RATE 秒
+        if ((server.unixtime - last_write_error_log) > AOF_WRITE_LOG_ERROR_RATE) {
+            can_log = 1;
+            last_write_error_log = server.unixtime;
+        }
+
+        /* Lof the AOF write error and record the error code. */
+        // 如果写入出错，那么尝试将该情况写入到日志里面
         if (nwritten == -1) {
-            // 写入出错
-            redisLog(REDIS_WARNING,"Exiting on error writing to the append-only file: %s",strerror(errno));
+            if (can_log) {
+                redisLog(REDIS_WARNING,"Error writing to the AOF file: %s",
+                    strerror(errno));
+                server.aof_last_write_errno = errno;
+            }
         } else {
-            // 写入不完整
-            redisLog(REDIS_WARNING,"Exiting on short write while writing to "
-                                   "the append-only file: %s (nwritten=%ld, "
-                                   "expected=%ld)",
-                                   strerror(errno),
-                                   (long)nwritten,
-                                   (long)sdslen(server.aof_buf));
+            if (can_log) {
+                redisLog(REDIS_WARNING,"Short write while writing to "
+                                       "the AOF file: (nwritten=%lld, "
+                                       "expected=%lld)",
+                                       (long long)nwritten,
+                                       (long long)sdslen(server.aof_buf));
+            }
 
             // 尝试移除新追加的不完整内容
             if (ftruncate(server.aof_fd, server.aof_current_size) == -1) {
-                redisLog(REDIS_WARNING, "Could not remove short write "
-                         "from the append-only file.  Redis may refuse "
-                         "to load the AOF the next time it starts.  "
-                         "ftruncate: %s", strerror(errno));
+                if (can_log) {
+                    redisLog(REDIS_WARNING, "Could not remove short write "
+                             "from the append-only file.  Redis may refuse "
+                             "to load the AOF the next time it starts.  "
+                             "ftruncate: %s", strerror(errno));
+                }
+            } else {
+                /* If the ftrunacate() succeeded we can set nwritten to
+                 * -1 since there is no longer partial data into the AOF. */
+                nwritten = -1;
             }
+            server.aof_last_write_errno = ENOSPC;
         }
 
-        // 服务器退出
-        exit(1);
+        /* Handle the AOF write error. */
+        if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
+            /* We can't recover when the fsync policy is ALWAYS since the
+             * reply for the client is already in the output buffers, and we
+             * have the contract with the user that on acknowledged write data
+             * is synched on disk. */
+            redisLog(REDIS_WARNING,"Can't recover from AOF write error when the AOF fsync policy is 'always'. Exiting...");
+            exit(1);
+        } else {
+            /* Recover from failed write leaving data into the buffer. However
+             * set an error to stop accepting writes as long as the error
+             * condition is not cleared. */
+            server.aof_last_write_status = REDIS_ERR;
+
+            /* Trim the sds buffer if there was a partial write, and there
+             * was no way to undo it with ftruncate(2). */
+            if (nwritten > 0) {
+                server.aof_current_size += nwritten;
+                sdsrange(server.aof_buf,nwritten,-1);
+            }
+            return; /* We'll try again on the next call... */
+        }
+    } else {
+        /* Successful write(2). If AOF was in error state, restore the
+         * OK state and log the event. */
+        if (server.aof_last_write_status == REDIS_ERR) {
+            redisLog(REDIS_WARNING,
+                "AOF write error looks solved, Redis can write again.");
+            server.aof_last_write_status = REDIS_OK;
+        }
     }
 
     // 更新写入后的 AOF 文件大小
@@ -748,6 +790,7 @@ struct redisClient *createFakeClient(void) {
     c->reply_bytes = 0;
     c->obuf_soft_limit_reached_time = 0;
     c->watched_keys = listCreate();
+    c->peerid = NULL;
     listSetFreeMethod(c->reply,decrRefCountVoid);
     listSetDupMethod(c->reply,dupClientReplyValue);
     initClientMultiState(c);
@@ -841,7 +884,7 @@ int loadAppendOnlyFile(char *filename) {
          */
         if (!(loops++ % 1000)) {
             loadingProgress(ftello(fp));
-            aeProcessEvents(server.el, AE_FILE_EVENTS|AE_DONT_WAIT);
+            processEventsWhileBlocked();
         }
 
         // 读入文件内容到缓存
@@ -1405,9 +1448,9 @@ int rewriteAppendOnlyFile(char *filename) {
 
     /* Make sure data will not remain on the OS's output buffers */
     // 冲洗并关闭新 AOF 文件
-    fflush(fp);
-    aof_fsync(fileno(fp));
-    fclose(fp);
+    if (fflush(fp) == EOF) goto werr;
+    if (aof_fsync(fileno(fp)) == -1) goto werr;
+    if (fclose(fp) == EOF) goto werr;
 
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. 

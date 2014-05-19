@@ -61,7 +61,7 @@ int listMatchPubsubPattern(void *a, void *b) {
  * 订阅成功返回 1 ，如果客户端已经订阅了该频道，那么返回 0 。
  */
 int pubsubSubscribeChannel(redisClient *c, robj *channel) {
-    struct dictEntry *de;
+    dictEntry *de;
     list *clients = NULL;
     int retval = 0;
 
@@ -125,7 +125,7 @@ int pubsubSubscribeChannel(redisClient *c, robj *channel) {
  * 如果取消成功返回 1 ，如果因为客户端未订阅频道，而造成取消失败，返回 0 。
  */
 int pubsubUnsubscribeChannel(redisClient *c, robj *channel, int notify) {
-    struct dictEntry *de;
+    dictEntry *de;
     list *clients;
     listNode *ln;
     int retval = 0;
@@ -390,7 +390,7 @@ int pubsubUnsubscribeAllPatterns(redisClient *c, int notify) {
  */
 int pubsubPublishMessage(robj *channel, robj *message) {
     int receivers = 0;
-    struct dictEntry *de;
+    dictEntry *de;
     listNode *ln;
     listIter li;
 
@@ -512,9 +512,10 @@ void punsubscribeCommand(redisClient *c) {
 void publishCommand(redisClient *c) {
 
     int receivers = pubsubPublishMessage(c->argv[1],c->argv[2]);
-
-    if (server.cluster_enabled) clusterPropagatePublish(c->argv[1],c->argv[2]);
-    forceCommandPropagation(c,REDIS_PROPAGATE_REPL);
+    if (server.cluster_enabled)
+        clusterPropagatePublish(c->argv[1],c->argv[2]);
+    else
+        forceCommandPropagation(c,REDIS_PROPAGATE_REPL);
     addReplyLongLong(c,receivers);
 }
 

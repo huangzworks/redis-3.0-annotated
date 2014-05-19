@@ -15,9 +15,6 @@
 #define REDIS_CLUSTER_NAMELEN 40    /* sha1 hex length */
 // 集群的实际端口号 = 用户指定的端口号 + REDIS_CLUSTER_PORT_INCR
 #define REDIS_CLUSTER_PORT_INCR 10000 /* Cluster port = baseport + PORT_INCR */
-// IPv6 地址的长度
-#define REDIS_CLUSTER_IPLEN INET6_ADDRSTRLEN /* IPv6 address string length */
-
 
 /* The following defines are amunt of time, sometimes expressed as
  * multiplicators of the node timeout value (when ending with MULT). 
@@ -35,10 +32,17 @@
 #define REDIS_CLUSTER_FAIL_UNDO_TIME_ADD 10 /* Some additional time. */
 // 在检查从节点数据是否有效时使用的乘法因子
 #define REDIS_CLUSTER_SLAVE_VALIDITY_MULT 10 /* Slave data validity. */
-// 发送投票请求的间隔时间的乘法因子
-#define REDIS_CLUSTER_FAILOVER_AUTH_RETRY_MULT 4 /* Auth request retry time. */
-// 在执行故障转移之前需要等待的秒数
 #define REDIS_CLUSTER_FAILOVER_DELAY 5 /* Seconds */
+#define REDIS_CLUSTER_DEFAULT_MIGRATION_BARRIER 1
+#define REDIS_CLUSTER_MF_TIMEOUT 5000 /* Milliseconds to do a manual failover. */
+#define REDIS_CLUSTER_MF_PAUSE_MULT 2 /* Master pause manual failover mult. */
+
+/* Redirection errors returned by getNodeByQuery(). */
+#define REDIS_CLUSTER_REDIR_NONE 0          /* Node can serve the request. */
+#define REDIS_CLUSTER_REDIR_CROSS_SLOT 1    /* Keys in different slots. */
+#define REDIS_CLUSTER_REDIR_UNSTABLE 2      /* Keys in slot resharding. */
+#define REDIS_CLUSTER_REDIR_ASK 3           /* -ASK redirection required. */
+#define REDIS_CLUSTER_REDIR_MOVED 4         /* -MOVED redirection required. */
 
 struct clusterNode;
 
@@ -64,8 +68,7 @@ typedef struct clusterLink {
 
 } clusterLink;
 
-
-/* Node flags 节点标识*/
+/* Cluster node flags and macros. */
 // 该节点为主节点
 #define REDIS_NODE_MASTER 1     /* The node is a master */
 // 该节点为从节点
@@ -88,6 +91,13 @@ typedef struct clusterLink {
 // 空名字（在节点为主节点时，用作消息中的 slaveof 属性的值）
 #define REDIS_NODE_NULL_NAME "\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
 
+#define nodeIsMaster(n) ((n)->flags & REDIS_NODE_MASTER)
+#define nodeIsSlave(n) ((n)->flags & REDIS_NODE_SLAVE)
+#define nodeInHandshake(n) ((n)->flags & REDIS_NODE_HANDSHAKE)
+#define nodeHasAddr(n) (!((n)->flags & REDIS_NODE_NOADDR))
+#define nodeWithoutAddr(n) ((n)->flags & REDIS_NODE_NOADDR)
+#define nodeTimedOut(n) ((n)->flags & REDIS_NODE_PFAIL)
+#define nodeFailed(n) ((n)->flags & REDIS_NODE_FAIL)
 
 /* This structure represent elements of node->fail_reports. */
 // 每个 clusterNodeFailReport 结构保存了一条其他节点对目标节点的下线报告
@@ -233,14 +243,20 @@ typedef struct clusterState {
     // 如果值为 1 ，表示本节点已经向其他节点发送了投票请求
     int failover_auth_sent;     /* True if we already asked for votes. */
 
-    // 集群当前进行选举的配置纪元
+    int failover_auth_rank;     /* This slave rank for current auth request. */
     uint64_t failover_auth_epoch; /* Epoch of the current election. */
-
+    /* Manual failover state in common. */
+    mstime_t mf_end;            /* Manual failover time limit (ms unixtime).
+                                   It is zero if there is no MF in progress. */
+    /* Manual failover state of master. */
+    clusterNode *mf_slave;      /* Slave performing the manual failover. */
+    /* Manual failover state of slave. */
+    long long mf_master_offset; /* Master offset the slave needs to start MF
+                                   or zero if stil not received. */
+    int mf_can_start;           /* If non-zero signal that the manual failover
+                                   can start requesting masters vote. */
     /* The followign fields are uesd by masters to take state on elections. */
-    // 以下一个域是主节点在进行故障迁移投票时使用的域
-
-    // 节点最后投票的配置纪元
-    uint64_t last_vote_epoch;   /* Epoch of the last vote granted. */
+    uint64_t lastVoteEpoch;     /* Epoch of the last vote granted. */
 
     // 在进入下个事件循环之前要做的事情，以各个 flag 来记录
     int todo_before_sleep; /* Things to do in clusterBeforeSleep(). */
@@ -287,6 +303,7 @@ typedef struct clusterState {
 #define CLUSTERMSG_TYPE_FAILOVER_AUTH_ACK 6     /* Yes, you have my vote */
 // 槽布局已经发生变化，消息发送者要求消息接收者进行相应的更新
 #define CLUSTERMSG_TYPE_UPDATE 7        /* Another node slots configuration */
+#define CLUSTERMSG_TYPE_MFSTART 8       /* Pause clients for manual failover */
 
 /* Initially we don't know our "name", but we'll find it once we connect
  * to the first node, using the getsockname() function. Then we'll use this
@@ -306,7 +323,7 @@ typedef struct {
     uint32_t pong_received;
 
     // 节点的 IP 地址
-    char ip[16];    /* IP address last time it was seen */
+    char ip[REDIS_IP_STR_LEN];    /* IP address last time it was seen */
 
     // 节点的端口号
     uint16_t port;  /* port last time it was seen */
@@ -381,9 +398,11 @@ union clusterMsgData {
 
 // 用来表示集群消息的结构（消息头，header）
 typedef struct {
-
+    char sig[4];        /* Siganture "RCmb" (Redis Cluster message bus). */
     // 消息的长度（包括这个消息头的长度和消息正文的长度）
     uint32_t totlen;    /* Total length of this message */
+    uint16_t ver;       /* Protocol version, currently set to 0. */
+    uint16_t notused0;  /* 2 bytes not used. */
 
     // 消息的类型
     uint16_t type;      /* Message type */
@@ -427,7 +446,7 @@ typedef struct {
     // 消息发送者所处集群的状态
     unsigned char state; /* Cluster state from the POV of the sender */
 
-    unsigned char notused2[3]; /* Reserved for future use. For alignment. */
+    unsigned char mflags[3]; /* Message flags: CLUSTERMSG_FLAG[012]_... */
 
     // 消息的正文（或者说，内容）
     union clusterMsgData data;
@@ -435,6 +454,12 @@ typedef struct {
 } clusterMsg;
 
 #define CLUSTERMSG_MIN_LEN (sizeof(clusterMsg)-sizeof(union clusterMsgData))
+
+/* Message flags better specify the packet content or are used to
+ * provide some information about the node state. */
+#define CLUSTERMSG_FLAG0_PAUSED (1<<0) /* Master paused for manual failover. */
+#define CLUSTERMSG_FLAG0_FORCEACK (1<<1) /* Give ACK to AUTH_REQUEST even if
+                                            master is up. */
 
 /* ---------------------- API exported outside cluster.c -------------------- */
 clusterNode *getNodeByQuery(redisClient *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, int *ask);

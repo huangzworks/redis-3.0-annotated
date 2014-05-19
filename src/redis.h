@@ -71,6 +71,7 @@
 #define REDIS_MIN_HZ            1
 #define REDIS_MAX_HZ            500 
 #define REDIS_SERVERPORT        6379    /* TCP port */
+#define REDIS_TCP_BACKLOG       511     /* TCP listen backlog */
 #define REDIS_MAXIDLETIME       0       /* default client timeout: infinite */
 #define REDIS_DEFAULT_DBNUM     16
 #define REDIS_CONFIGLINE_MAX    1024
@@ -112,7 +113,7 @@
 #define REDIS_DEFAULT_SLAVE_READ_ONLY 1
 #define REDIS_DEFAULT_REPL_DISABLE_TCP_NODELAY 0
 #define REDIS_DEFAULT_MAXMEMORY 0
-#define REDIS_DEFAULT_MAXMEMORY_SAMPLES 3
+#define REDIS_DEFAULT_MAXMEMORY_SAMPLES 5
 #define REDIS_DEFAULT_AOF_FILENAME "appendonly.aof"
 #define REDIS_DEFAULT_AOF_NO_FSYNC_ON_REWRITE 0
 #define REDIS_DEFAULT_ACTIVE_REHASHING 1
@@ -122,6 +123,7 @@
 #define REDIS_IP_STR_LEN INET6_ADDRSTRLEN
 #define REDIS_PEER_ID_LEN (REDIS_IP_STR_LEN+32) /* Must be enough for ip:port */
 #define REDIS_BINDADDR_MAX 16
+#define REDIS_MIN_RESERVED_FDS 32
 
 #define ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP 20 /* Loopkups per loop. */
 #define ACTIVE_EXPIRE_CYCLE_FAST_DURATION 1000 /* Microseconds */
@@ -140,9 +142,9 @@
 // 就执行一次显式的 fsync
 #define REDIS_AOF_AUTOSYNC_BYTES (1024*1024*32) /* fdatasync every 32MB */
 /* When configuring the Redis eventloop, we setup it so that the total number
- * of file descriptors we can handle are server.maxclients + FDSET_INCR
+ * of file descriptors we can handle are server.maxclients + RESERVED_FDS + FDSET_INCR
  * that is our safety margin. */
-#define REDIS_EVENTLOOP_FDSET_INCR 128
+#define REDIS_EVENTLOOP_FDSET_INCR (REDIS_MIN_RESERVED_FDS+96)
 
 /* Hash table parameters */
 #define REDIS_HT_MINFILL        10      /* Minimal hash table fill 10% */
@@ -312,6 +314,9 @@
 #define REDIS_ZSET_MAX_ZIPLIST_ENTRIES 128
 #define REDIS_ZSET_MAX_ZIPLIST_VALUE 64
 
+/* HyperLogLog defines */
+#define REDIS_DEFAULT_HLL_SPARSE_MAX_BYTES 3000
+
 /* Sets operations codes */
 #define REDIS_OP_UNION 0
 #define REDIS_OP_DIFF 1
@@ -324,7 +329,7 @@
 #define REDIS_MAXMEMORY_ALLKEYS_LRU 3
 #define REDIS_MAXMEMORY_ALLKEYS_RANDOM 4
 #define REDIS_MAXMEMORY_NO_EVICTION 5
-#define REDIS_DEFAULT_MAXMEMORY_POLICY REDIS_MAXMEMORY_VOLATILE_LRU
+#define REDIS_DEFAULT_MAXMEMORY_POLICY REDIS_MAXMEMORY_NO_EVICTION
 
 /* Scripting */
 #define REDIS_LUA_TIME_LIMIT 5000 /* milliseconds */
@@ -383,24 +388,22 @@ typedef long long mstime_t; /* millisecond time type. */
 /* A redis object, that is a type able to hold a string / list / set */
 
 /* The actual Redis Object */
-#define REDIS_LRU_CLOCK_MAX ((1<<21)-1) /* Max value of obj->lru */
-#define REDIS_LRU_CLOCK_RESOLUTION 10 /* LRU clock resolution in seconds */
 /*
  * Redis 对象
  */
+#define REDIS_LRU_BITS 24
+#define REDIS_LRU_CLOCK_MAX ((1<<REDIS_LRU_BITS)-1) /* Max value of obj->lru */
+#define REDIS_LRU_CLOCK_RESOLUTION 1000 /* LRU clock resolution in ms */
 typedef struct redisObject {
 
     // 类型
     unsigned type:4;
 
-    // 对齐位，不使用
-    unsigned notused:2;     /* Not used */
-
     // 编码
     unsigned encoding:4;
 
     // 对象最后一次被访问的时间
-    unsigned lru:22;        /* lru time (relative to server.lruclock) */
+    unsigned lru:REDIS_LRU_BITS; /* lru time (relative to server.lruclock) */
 
     // 引用计数
     int refcount;
@@ -409,6 +412,12 @@ typedef struct redisObject {
     void *ptr;
 
 } robj;
+
+/* Macro used to obtain the current LRU clock.
+ * If the current resolution is lower than the frequency we refresh the
+ * LRU clock (as it should be in production servers) we return the
+ * precomputed value, otherwise we need to resort to a function call. */
+#define LRU_CLOCK() ((1000/server.hz <= REDIS_LRU_CLOCK_RESOLUTION) ? server.lruclock : getLRUClock())
 
 /* Macro used to initialize a Redis object allocated on the stack.
  * Note that this macro is taken near the structure definition to make sure
@@ -421,6 +430,22 @@ typedef struct redisObject {
     _var.ptr = _ptr; \
 } while(0);
 
+/* To improve the quality of the LRU approximation we take a set of keys
+ * that are good candidate for eviction across freeMemoryIfNeeded() calls.
+ *
+ * Entries inside the eviciton pool are taken ordered by idle time, putting
+ * greater idle times to the right (ascending order).
+ *
+ * Empty entries have the key pointer set to NULL. */
+#define REDIS_EVICTION_POOL_SIZE 16
+struct evictionPoolEntry {
+    unsigned long long idle;    /* Object idle time. */
+    sds key;                    /* Key name. */
+};
+
+/* Redis database representation. There are multiple databases identified
+ * by integers from 0 (the default database) up to the max configured
+ * database. The database number is the 'id' field in the structure. */
 typedef struct redisDb {
 
     // 数据库键空间，保存着数据库中的所有键值对
@@ -438,8 +463,10 @@ typedef struct redisDb {
     // 正在被 WATCH 命令监视的键
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
 
+    struct evictionPoolEntry *eviction_pool;    /* Eviction pool of keys */
+
     // 数据库号码
-    int id;
+    int id;                     /* Database ID */
 
     // 数据库的键的平均 TTL ，统计信息
     long long avg_ttl;          /* Average TTL, just for stats */
@@ -628,6 +655,7 @@ typedef struct redisClient {
     // 记录了所有订阅频道的客户端的信息
     // 新 pubsubPattern 结构总是被添加到表尾
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
+    sds peerid;             /* Cached peer ID. */
 
     /* Response buffer */
     // 回复偏移量
@@ -654,9 +682,9 @@ struct sharedObjectsStruct {
     *emptymultibulk, *wrongtypeerr, *nokeyerr, *syntaxerr, *sameobjecterr,
     *outofrangeerr, *noscripterr, *loadingerr, *slowscripterr, *bgsaveerr,
     *masterdownerr, *roslaveerr, *execaborterr, *noautherr, *noreplicaserr,
-    *oomerr, *plus, *messagebulk, *pmessagebulk, *subscribebulk,
+    *busykeyerr, *oomerr, *plus, *messagebulk, *pmessagebulk, *subscribebulk,
     *unsubscribebulk, *psubscribebulk, *punsubscribebulk, *del, *rpop, *lpop,
-    *lpush, *emptyscan,
+    *lpush, *emptyscan, *minstring, *maxstring,
     *select[REDIS_SHARED_SELECT_CMDS],
     *integers[REDIS_SHARED_INTEGERS],
     *mbulkhdr[REDIS_SHARED_BULKHDR_LEN], /* "*<value>\r\n" */
@@ -800,8 +828,7 @@ struct redisServer {
     aeEventLoop *el;
 
     // 最近一次使用时钟
-    unsigned lruclock:22;       /* Clock incrementing every minute, for LRU */
-    unsigned lruclock_padding:10;
+    unsigned lruclock:REDIS_LRU_BITS; /* Clock for LRU eviction */
 
     // 关闭服务器的标识
     int shutdown_asap;          /* SHUTDOWN needed ASAP */
@@ -833,6 +860,8 @@ struct redisServer {
     // TCP 监听端口
     int port;                   /* TCP listening port */
 
+    int tcp_backlog;            /* TCP listen() backlog */
+
     // 地址
     char *bindaddr[REDIS_BINDADDR_MAX]; /* Addresses we should bind to */
     // 地址数量
@@ -863,6 +892,9 @@ struct redisServer {
 
     // 服务器的当前客户端，仅用于崩溃报告
     redisClient *current_client; /* Current client, only used on crash report */
+
+    int clients_paused;         /* True if clients are currently paused */
+    mstime_t clients_pause_end_time; /* Time when we undo clients_paused */
 
     // 网络错误
     char neterr[ANET_ERR_LEN];   /* Error buffer for anet.c */
@@ -947,8 +979,7 @@ struct redisServer {
 
     // 服务器配置 slowlog-max-len 选项的值
     unsigned long slowlog_max_len;     /* SLOWLOG max number of items logged */
-
-
+    size_t resident_set_size;       /* RSS sampled in serverCron(). */
     /* The following two are used to track instantaneous "load" in terms
      * of operations per second. */
     // 最后一次进行抽样的时间
@@ -1033,8 +1064,8 @@ struct redisServer {
 
     // 指示是否需要每写入一定量的数据，就主动执行一次 fsync()
     int aof_rewrite_incremental_fsync;/* fsync incrementally while rewriting? */
-
-
+    int aof_last_write_status;      /* REDIS_OK or REDIS_ERR */
+    int aof_last_write_errno;       /* Valid if aof_last_write_status is ERR */
     /* RDB persistence */
 
     // 自从上次 SAVE 执行以来，数据库被修改的次数
@@ -1173,7 +1204,7 @@ struct redisServer {
     list *clients_waiting_acks;         /* Clients waiting in WAIT command. */
     int get_ack_from_slaves;            /* If true we send REPLCONF GETACK. */
     /* Limits */
-    unsigned int maxclients;        /* Max number of simultaneous clients */
+    int maxclients;                 /* Max number of simultaneous clients */
     unsigned long long maxmemory;   /* Max number of memory bytes to use */
     int maxmemory_policy;           /* Policy for key eviction */
     int maxmemory_samples;          /* Pricision of random sampling */
@@ -1201,7 +1232,7 @@ struct redisServer {
     size_t set_max_intset_entries;
     size_t zset_max_ziplist_entries;
     size_t zset_max_ziplist_value;
-
+    size_t hll_sparse_max_bytes;
     time_t unixtime;        /* Unix time sampled every cron cycle. */
     long long mstime;       /* Like 'unixtime' but with milliseconds resolution. */
 
@@ -1226,7 +1257,7 @@ struct redisServer {
     char *cluster_configfile; /* Cluster auto-generated config file name. */
     struct clusterState *cluster;  /* State of the cluster */
 
-
+    int cluster_migration_barrier; /* Cluster replicas migration barrier. */
     /* Scripting */
 
     // Lua 环境
@@ -1240,12 +1271,10 @@ struct redisServer {
 
     // 一个字典，值为 Lua 脚本，键为脚本的 SHA1 校验和
     dict *lua_scripts;         /* A dictionary of SHA1 -> Lua scripts */
-
     // Lua 脚本的执行时限
-    long long lua_time_limit;  /* Script timeout in seconds */
-
+    mstime_t lua_time_limit;  /* Script timeout in milliseconds */
     // 脚本开始执行的时间
-    long long lua_time_start;  /* Start time of script */
+    mstime_t lua_time_start;  /* Start time of script, milliseconds time */
 
     // 脚本是否执行过写命令
     int lua_write_dirty;  /* True if a write command was called during the
@@ -1286,7 +1315,7 @@ typedef struct pubsubPattern {
 } pubsubPattern;
 
 typedef void redisCommandProc(redisClient *c);
-typedef int *redisGetKeysProc(struct redisCommand *cmd, robj **argv, int argc, int *numkeys, int flags);
+typedef int *redisGetKeysProc(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
 
 /*
  * Redis 命令
@@ -1511,8 +1540,8 @@ void *dupClientReplyValue(void *o);
 void getClientsMaxBuffers(unsigned long *longest_output_list,
                           unsigned long *biggest_input_buffer);
 void formatPeerId(char *peerid, size_t peerid_len, char *ip, int port);
-int getClientPeerId(redisClient *client, char *peerid, size_t peerid_len);
-sds getClientInfoString(redisClient *client);
+char *getClientPeerId(redisClient *client);
+sds catClientInfoString(sds s, redisClient *client);
 sds getAllClientsInfoString(void);
 void rewriteClientCommandVector(redisClient *c, int argc, ...);
 void rewriteClientCommandArgument(redisClient *c, int i, robj *newval);
@@ -1524,6 +1553,9 @@ char *getClientLimitClassName(int class);
 void flushSlavesOutputBuffers(void);
 void disconnectSlaves(void);
 int listenToPort(int port, int *fds, int *count);
+void pauseClients(mstime_t duration);
+int clientsArePaused(void);
+int processEventsWhileBlocked(void);
 
 #ifdef __GNUC__
 void addReplyErrorFormat(redisClient *c, const char *fmt, ...)
@@ -1601,7 +1633,7 @@ char *strEncoding(int encoding);
 int compareStringObjects(robj *a, robj *b);
 int collateStringObjects(robj *a, robj *b);
 int equalStringObjects(robj *a, robj *b);
-unsigned long estimateObjectIdleTime(robj *o);
+unsigned long long estimateObjectIdleTime(robj *o);
 #define sdsEncodedObject(objptr) (objptr->encoding == REDIS_ENCODING_RAW || objptr->encoding == REDIS_ENCODING_EMBSTR)
 
 /* Synchronous I/O with timeout */
@@ -1628,6 +1660,7 @@ void processClientsWaitingReplicas(void);
 void unblockClientWaitingReplicas(redisClient *c);
 int replicationCountAcksByOffset(long long offset);
 void replicationSendNewlineToMaster(void);
+long long replicationGetSlaveOffset(void);
 
 /* Generic persistence functions */
 void startLoading(FILE *fp);
@@ -1651,10 +1684,8 @@ unsigned long aofRewriteBufferSize(void);
 
 /* Sorted sets data type */
 
-/* Struct to hold a inclusive/exclusive range spec.
- *
- * 表示开区间/闭区间范围的结构
- */
+/* Struct to hold a inclusive/exclusive range spec by score comparison. */
+// 表示开区间/闭区间范围的结构
 typedef struct {
 
     // 最小值和最大值
@@ -1665,13 +1696,19 @@ typedef struct {
     int minex, maxex; /* are min or max exclusive? */
 } zrangespec;
 
+/* Struct to hold an inclusive/exclusive range spec by lexicographic comparison. */
+typedef struct {
+    robj *min, *max;  /* May be set to shared.(minstring|maxstring) */
+    int minex, maxex; /* are min or max exclusive? */
+} zlexrangespec;
+
 zskiplist *zslCreate(void);
 void zslFree(zskiplist *zsl);
 zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj);
 unsigned char *zzlInsert(unsigned char *zl, robj *ele, double score);
 int zslDelete(zskiplist *zsl, double score, robj *obj);
-zskiplistNode *zslFirstInRange(zskiplist *zsl, zrangespec range);
-zskiplistNode *zslLastInRange(zskiplist *zsl, zrangespec range);
+zskiplistNode *zslFirstInRange(zskiplist *zsl, zrangespec *range);
+zskiplistNode *zslLastInRange(zskiplist *zsl, zrangespec *range);
 double zzlGetScore(unsigned char *sptr);
 void zzlNext(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
 void zzlPrev(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
@@ -1707,6 +1744,9 @@ void populateCommandTable(void);
 void resetCommandTableStats(void);
 void adjustOpenFilesLimit(void);
 void closeListeningSockets(int unlink_unix_socket);
+void updateCachedTime(void);
+void resetServerStats(void);
+unsigned int getLRUClock(void);
 
 /* Set data type */
 robj *setTypeCreate(robj *value);
@@ -1778,24 +1818,24 @@ void setKey(redisDb *db, robj *key, robj *val);
 int dbExists(redisDb *db, robj *key);
 robj *dbRandomKey(redisDb *db);
 int dbDelete(redisDb *db, robj *key);
+robj *dbUnshareStringValue(redisDb *db, robj *key, robj *o);
 long long emptyDb(void(callback)(void*));
 int selectDb(redisClient *c, int id);
 void signalModifiedKey(redisDb *db, robj *key);
 void signalFlushedDb(int dbid);
 unsigned int getKeysInSlot(unsigned int hashslot, robj **keys, unsigned int count);
 unsigned int countKeysInSlot(unsigned int hashslot);
+unsigned int delKeysInSlot(unsigned int hashslot);
 int verifyClusterConfigWithData(void);
 void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor);
 int parseScanCursorOrReply(redisClient *c, robj *o, unsigned long *cursor);
 
 /* API to get key arguments from commands */
-#define REDIS_GETKEYS_ALL 0
-#define REDIS_GETKEYS_PRELOAD 1
-int *getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, int *numkeys, int flags);
+int *getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
 void getKeysFreeResult(int *result);
-int *noPreloadGetKeys(struct redisCommand *cmd,robj **argv, int argc, int *numkeys, int flags);
-int *renameGetKeys(struct redisCommand *cmd,robj **argv, int argc, int *numkeys, int flags);
-int *zunionInterGetKeys(struct redisCommand *cmd,robj **argv, int argc, int *numkeys, int flags);
+int *zunionInterGetKeys(struct redisCommand *cmd,robj **argv, int argc, int *numkeys);
+int *evalGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
+int *sortGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
 
 /* Cluster */
 void clusterInit(void);
@@ -1914,12 +1954,16 @@ void zincrbyCommand(redisClient *c);
 void zrangeCommand(redisClient *c);
 void zrangebyscoreCommand(redisClient *c);
 void zrevrangebyscoreCommand(redisClient *c);
+void zrangebylexCommand(redisClient *c);
+void zrevrangebylexCommand(redisClient *c);
 void zcountCommand(redisClient *c);
+void zlexcountCommand(redisClient *c);
 void zrevrangeCommand(redisClient *c);
 void zcardCommand(redisClient *c);
 void zremCommand(redisClient *c);
 void zscoreCommand(redisClient *c);
 void zremrangebyscoreCommand(redisClient *c);
+void zremrangebylexCommand(redisClient *c);
 void multiCommand(redisClient *c);
 void execCommand(redisClient *c);
 void discardCommand(redisClient *c);
@@ -1972,8 +2016,14 @@ void scriptCommand(redisClient *c);
 void timeCommand(redisClient *c);
 void bitopCommand(redisClient *c);
 void bitcountCommand(redisClient *c);
+void bitposCommand(redisClient *c);
 void replconfCommand(redisClient *c);
 void waitCommand(redisClient *c);
+void pfselftestCommand(redisClient *c);
+void pfaddCommand(redisClient *c);
+void pfcountCommand(redisClient *c);
+void pfmergeCommand(redisClient *c);
+void pfdebugCommand(redisClient *c);
 
 #if defined(__GNUC__)
 void *calloc(size_t count, size_t size) __attribute__ ((deprecated));
