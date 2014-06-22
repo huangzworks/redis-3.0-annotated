@@ -485,6 +485,7 @@ void flushAppendOnlyFile(int force) {
         }
 
         /* Handle the AOF write error. */
+        // 处理写入 AOF 文件时出现的错误
         if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
             /* We can't recover when the fsync policy is ALWAYS since the
              * reply for the client is already in the output buffers, and we
@@ -509,6 +510,7 @@ void flushAppendOnlyFile(int force) {
     } else {
         /* Successful write(2). If AOF was in error state, restore the
          * OK state and log the event. */
+        // 写入成功，更新最后写入状态
         if (server.aof_last_write_status == REDIS_ERR) {
             redisLog(REDIS_WARNING,
                 "AOF write error looks solved, Redis can write again.");
@@ -1824,10 +1826,13 @@ void backgroundRewriteDoneHandler(int exitcode, int bysignal) {
 
 cleanup:
 
+    // 清空 AOF 缓冲区
     aofRewriteBufferReset();
 
+    // 移除临时文件
     aofRemoveTempFile(server.aof_child_pid);
 
+    // 重置默认属性
     server.aof_child_pid = -1;
     server.aof_rewrite_time_last = time(NULL)-server.aof_rewrite_time_start;
     server.aof_rewrite_time_start = -1;
