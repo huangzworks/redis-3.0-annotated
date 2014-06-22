@@ -229,6 +229,7 @@ int anetResolveIP(char *err, char *host, char *ipbuf, size_t ipbuf_len) {
     return anetGenericResolve(err,host,ipbuf,ipbuf_len,ANET_IP_ONLY);
 }
 
+// 设置地址为可重用
 static int anetSetReuseAddr(char *err, int fd) {
     int yes = 1;
     /* Make sure connection-intensive things like the redis benckmark
@@ -259,6 +260,7 @@ static int anetCreateSocket(char *err, int domain) {
     return s;
 }
 
+// 通用连接创建函数，被其他高层函数所调用
 #define ANET_CONNECT_NONE 0
 #define ANET_CONNECT_NONBLOCK 1
 static int anetTcpGenericConnect(char *err, char *addr, int port,
