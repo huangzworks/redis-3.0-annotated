@@ -67,6 +67,7 @@
 #define REDIS_ERR               -1
 
 /* Static server configuration */
+/* 默认的服务器配置值 */
 #define REDIS_DEFAULT_HZ        10      /* Time interrupt calls/sec. */
 #define REDIS_MIN_HZ            1
 #define REDIS_MAX_HZ            500 
@@ -151,6 +152,7 @@
 
 /* Command flags. Please check the command table defined in the redis.c file
  * for more information about the meaning of every flag. */
+// 命令标志
 #define REDIS_CMD_WRITE 1                   /* "w" flag */
 #define REDIS_CMD_READONLY 2                /* "r" flag */
 #define REDIS_CMD_DENYOOM 4                 /* "m" flag */
@@ -166,6 +168,7 @@
 #define REDIS_CMD_ASKING 4096               /* "k" flag */
 
 /* Object types */
+// 对象类型
 #define REDIS_STRING 0
 #define REDIS_LIST 1
 #define REDIS_SET 2
@@ -175,6 +178,7 @@
 /* Objects encoding. Some kind of objects like Strings and Hashes can be
  * internally represented in multiple ways. The 'encoding' field of the object
  * is set to one of this fields for this object. */
+// 对象编码
 #define REDIS_ENCODING_RAW 0     /* Raw representation */
 #define REDIS_ENCODING_INT 1     /* Encoded as integer */
 #define REDIS_ENCODING_HT 2      /* Encoded as hash table */
@@ -507,20 +511,29 @@ typedef struct multiState {
 
 /* This structure holds the blocking operation state for a client.
  * The fields used depend on client->btype. */
+// 阻塞状态
 typedef struct blockingState {
+
     /* Generic fields. */
+    // 阻塞时限
     mstime_t timeout;       /* Blocking operation timeout. If UNIX current time
                              * is > timeout then the operation timed out. */
 
     /* REDIS_BLOCK_LIST */
+    // 造成阻塞的键
     dict *keys;             /* The keys we are waiting to terminate a blocking
                              * operation such as BLPOP. Otherwise NULL. */
+    // 在被阻塞的键有新元素进入时，需要将这些新元素添加到哪里的目标键
+    // 用于 BRPOPLPUSH 命令
     robj *target;           /* The key that should receive the element,
                              * for BRPOPLPUSH. */
 
     /* REDIS_BLOCK_WAIT */
+    // 等待 ACK 的复制节点数量
     int numreplicas;        /* Number of replicas we are waiting for ACK. */
+    // 复制偏移量
     long long reploffset;   /* Replication offset to reach. */
+
 } blockingState;
 
 /* The following structure represents a node in the server.ready_keys list,
@@ -534,6 +547,7 @@ typedef struct blockingState {
  * also called ready_keys in every structure representing a Redis database,
  * where we make sure to remember if a given key was already added in the
  * server.ready_keys list. */
+// 记录解除了客户端的阻塞状态的键，以及键所在的数据库。
 typedef struct readyList {
     redisDb *db;
     robj *key;
@@ -638,9 +652,12 @@ typedef struct redisClient {
     // 事务状态
     multiState mstate;      /* MULTI/EXEC state */
 
+    // 阻塞类型
     int btype;              /* Type of blocking op if REDIS_BLOCKED. */
     // 阻塞状态
     blockingState bpop;     /* blocking state */
+
+    // 最后被写入的全局复制偏移量
     long long woff;         /* Last write global replication offset. */
 
     // 被监视的键
@@ -676,6 +693,7 @@ struct saveparam {
 
 };
 
+// 通过复用来减少内存碎片，以及减少操作耗时的共享对象
 struct sharedObjectsStruct {
     robj *crlf, *ok, *err, *emptybulk, *czero, *cone, *cnegone, *pong, *space,
     *colon, *nullbulk, *nullmultibulk, *queued,
@@ -761,6 +779,7 @@ typedef struct clientBufferLimitsConfig {
     time_t soft_limit_seconds;
 } clientBufferLimitsConfig;
 
+// 限制可以有多个
 extern clientBufferLimitsConfig clientBufferLimitsDefaults[REDIS_CLIENT_LIMIT_NUM_CLASSES];
 
 /* The redisOp structure defines a Redis Operation, that is an instance of
