@@ -892,6 +892,7 @@ void sentinelEvent(int level, char *type, sentinelRedisInstance *ri,
  * +monitor event for every configured master. The same events are also
  * generated when a master to monitor is added at runtime via the
  * SENTINEL MONITOR command. */
+// 在 Sentinel 启动时执行，用于创建并生成 +monitor 事件
 void sentinelGenerateInitialMonitorEvents(void) {
     dictIterator *di;
     dictEntry *de;
@@ -907,6 +908,7 @@ void sentinelGenerateInitialMonitorEvents(void) {
 /* ============================ script execution ============================ */
 
 /* Release a script job structure and all the associated data. */
+// 释放一个脚本任务结构，以及该任务的相关数据。
 void sentinelReleaseScriptJob(sentinelScriptJob *sj) {
     int j = 0;
 
@@ -2277,6 +2279,7 @@ void sentinelSendAuthIfNeeded(sentinelRedisInstance *ri, redisAsyncContext *c) {
  *
  * This makes it possible to list all the sentinel instances connected
  * to a Redis servewr with CLIENT LIST, grepping for a specific name format. */
+// 使用 CLIENT SETNAME 命令，为给定的客户端设置名字。
 void sentinelSetClientName(sentinelRedisInstance *ri, redisAsyncContext *c, char *type) {
     char name[64];
 
@@ -2361,6 +2364,7 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
             // 发送 AUTH 命令，验证身份
             sentinelSendAuthIfNeeded(ri,ri->pc);
 
+            // 为客户但设置名字 "pubsub"
             sentinelSetClientName(ri,ri->pc,"pubsub");
 
             /* Now we subscribe to the Sentinels "Hello" channel. */
@@ -2579,6 +2583,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
 
     /* None of the following conditions are processed when in tilt mode, so
      * return asap. */
+    // 如果 Sentinel 正处于 TILT 模式，那么它不能执行以下的语句。
     if (sentinel.tilt) return;
 
     /* Handle master -> slave role switch. */
@@ -2811,8 +2816,14 @@ void sentinelPublishReplyCallback(redisAsyncContext *c, void *reply, void *privd
 /* Process an hello message received via Pub/Sub in master or slave instance,
  * or sent directly to this sentinel via the (fake) PUBLISH command of Sentinel.
  *
+ * 处理从 Pub/Sub 连接得来的，来自主服务器或者从服务器的 hello 消息。
+ * hello 消息也可能是另一个 Sentinel 通过 PUBLISH 命令发送过来的。
+ *
  * If the master name specified in the message is not known, the message is
- * discareded. */
+ * discareded. 
+ *
+ * 如果消息里面指定的主服务器的名字是未知的，那么这条消息将被丢弃。
+ */
 void sentinelProcessHelloMessage(char *hello, int hello_len) {
     /* Format is composed of 8 tokens:
      * 0=ip,1=port,2=runid,3=current_epoch,4=master_name,
@@ -2824,10 +2835,12 @@ void sentinelProcessHelloMessage(char *hello, int hello_len) {
 
     if (numtokens == 8) {
         /* Obtain a reference to the master this hello message is about */
+        // 获取主服务器的名字，并丢弃和未知主服务器相关的消息。
         master = sentinelGetMasterByName(token[4]);
         if (!master) goto cleanup; /* Unknown master, skip the message. */
 
         /* First, try to see if we already have this sentinel. */
+        // 看这个 Sentinel 是否已经认识发送消息的 Sentinel
         port = atoi(token[1]);
         master_port = atoi(token[6]);
         si = getSentinelRedisInstanceByAddrAndRunID(
@@ -2836,6 +2849,10 @@ void sentinelProcessHelloMessage(char *hello, int hello_len) {
         master_config_epoch = strtoull(token[7],NULL,10);
 
         if (!si) {
+
+            // 这个 Sentinel 不认识发送消息的 Sentinel 
+            // 将对方加入到 Sentinel 列表中
+
             /* If not, remove all the sentinels that have the same runid
              * OR the same ip/port, because it's either a restart or a
              * network topology change. */
@@ -2861,6 +2878,7 @@ void sentinelProcessHelloMessage(char *hello, int hello_len) {
         }
 
         /* Update local current_epoch if received current_epoch is greater.*/
+        // 如果消息中记录的纪元比 Sentinel 当前的纪元要高，那么更新纪元
         if (current_epoch > sentinel.current_epoch) {
             sentinel.current_epoch = current_epoch;
             sentinelFlushConfig();
@@ -2869,6 +2887,7 @@ void sentinelProcessHelloMessage(char *hello, int hello_len) {
         }
 
         /* Update master info if received configuration is newer. */
+        // 如果消息中记录的配置信息更新，那么对主服务器的信息进行更新
         if (master->config_epoch < master_config_epoch) {
             master->config_epoch = master_config_epoch;
             if (master_port != master->addr->port ||
@@ -2893,6 +2912,7 @@ void sentinelProcessHelloMessage(char *hello, int hello_len) {
         }
 
         /* Update the state of the Sentinel. */
+        // 更新我方 Sentinel 记录的对方 Sentinel 的信息。
         if (si) si->last_hello_time = mstime();
     }
 
@@ -3003,6 +3023,7 @@ int sentinelSendHello(sentinelRedisInstance *ri) {
  *
  * On error zero is returned, and we can't consider the PING command
  * queued in the connection. */
+// 向指定的 Sentinel 发送 PING 命令。
 int sentinelSendPing(sentinelRedisInstance *ri) {
     int retval = redisAsyncCommand(ri->cc,
         sentinelPingReplyCallback, NULL, "PING");
