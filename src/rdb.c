@@ -1575,6 +1575,7 @@ void startLoading(FILE *fp) {
 }
 
 /* Refresh the loading progress info */
+// 刷新载入进度信息
 void loadingProgress(off_t pos) {
     server.loading_loaded_bytes = pos;
     if (server.stat_peak_memory < zmalloc_used_memory())
@@ -1591,6 +1592,8 @@ void stopLoading(void) {
 
 /* Track loading progress in order to serve client's from time to time
    and if needed calculate rdb checksum  */
+// 记录载入进度信息，以便让客户端进行查询
+// 这也会在计算 RDB 校验和时用到。
 void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
     if (server.rdb_checksum)
         rioGenericUpdateChecksum(r, buf, len);
