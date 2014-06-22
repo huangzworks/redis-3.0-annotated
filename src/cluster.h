@@ -32,18 +32,29 @@
 #define REDIS_CLUSTER_FAIL_UNDO_TIME_ADD 10 /* Some additional time. */
 // 在检查从节点数据是否有效时使用的乘法因子
 #define REDIS_CLUSTER_SLAVE_VALIDITY_MULT 10 /* Slave data validity. */
+// 在执行故障转移之前需要等待的秒数，似乎已经废弃
 #define REDIS_CLUSTER_FAILOVER_DELAY 5 /* Seconds */
+// 未使用，似乎已经废弃
 #define REDIS_CLUSTER_DEFAULT_MIGRATION_BARRIER 1
+// 在进行手动的故障转移之前，需要等待的超时时间
 #define REDIS_CLUSTER_MF_TIMEOUT 5000 /* Milliseconds to do a manual failover. */
+// 未使用，似乎已经废弃
 #define REDIS_CLUSTER_MF_PAUSE_MULT 2 /* Master pause manual failover mult. */
 
 /* Redirection errors returned by getNodeByQuery(). */
+/* 由 getNodeByQuery() 函数返回的转向错误。 */
+// 节点可以处理这个命令
 #define REDIS_CLUSTER_REDIR_NONE 0          /* Node can serve the request. */
+// 键在其他槽
 #define REDIS_CLUSTER_REDIR_CROSS_SLOT 1    /* Keys in different slots. */
+// 键所处的槽正在进行 reshard
 #define REDIS_CLUSTER_REDIR_UNSTABLE 2      /* Keys in slot resharding. */
+// 需要进行 ASK 转向
 #define REDIS_CLUSTER_REDIR_ASK 3           /* -ASK redirection required. */
+// 需要进行 MOVED 转向
 #define REDIS_CLUSTER_REDIR_MOVED 4         /* -MOVED redirection required. */
 
+// 前置定义，防止编译错误
 struct clusterNode;
 
 
@@ -91,6 +102,7 @@ typedef struct clusterLink {
 // 空名字（在节点为主节点时，用作消息中的 slaveof 属性的值）
 #define REDIS_NODE_NULL_NAME "\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
 
+// 用于判断节点身份和状态的一系列宏
 #define nodeIsMaster(n) ((n)->flags & REDIS_NODE_MASTER)
 #define nodeIsSlave(n) ((n)->flags & REDIS_NODE_SLAVE)
 #define nodeInHandshake(n) ((n)->flags & REDIS_NODE_HANDSHAKE)
@@ -186,9 +198,10 @@ struct clusterNode {
 typedef struct clusterNode clusterNode;
 
 
-// 集群状态，每个节点都保存着一个这样的状态，记录了它们眼中的集群的样子
-// 注意，结构中有一部分属性其实和节点有关的，不知道为什么被放在了这里
-// 比如 slots_to_keys 、failover_auth_count 等属性就是和本节点有关的
+// 集群状态，每个节点都保存着一个这样的状态，记录了它们眼中的集群的样子。
+// 另外，虽然这个结构主要用于记录集群的属性，但是为了节约资源，
+// 有些与节点有关的属性，比如 slots_to_keys 、 failover_auth_count 
+// 也被放到了这个结构里面。
 typedef struct clusterState {
 
     // 指向当前节点的指针
@@ -244,18 +257,31 @@ typedef struct clusterState {
     int failover_auth_sent;     /* True if we already asked for votes. */
 
     int failover_auth_rank;     /* This slave rank for current auth request. */
+
     uint64_t failover_auth_epoch; /* Epoch of the current election. */
+
     /* Manual failover state in common. */
+    /* 共用的手动故障转移状态 */
+
+    // 手动故障转移执行的时间限制
     mstime_t mf_end;            /* Manual failover time limit (ms unixtime).
                                    It is zero if there is no MF in progress. */
     /* Manual failover state of master. */
+    /* 主服务器的手动故障转移状态 */
     clusterNode *mf_slave;      /* Slave performing the manual failover. */
     /* Manual failover state of slave. */
+    /* 从服务器的手动故障转移状态 */
     long long mf_master_offset; /* Master offset the slave needs to start MF
                                    or zero if stil not received. */
+    // 指示手动故障转移是否可以开始的标志值
+    // 值为非 0 时表示各个主服务器可以开始投票
     int mf_can_start;           /* If non-zero signal that the manual failover
                                    can start requesting masters vote. */
+
     /* The followign fields are uesd by masters to take state on elections. */
+    /* 以下这些域由主服务器使用，用于记录选举时的状态 */
+
+    // 集群最后一次进行投票的纪元
     uint64_t lastVoteEpoch;     /* Epoch of the last vote granted. */
 
     // 在进入下个事件循环之前要做的事情，以各个 flag 来记录
@@ -303,6 +329,7 @@ typedef struct clusterState {
 #define CLUSTERMSG_TYPE_FAILOVER_AUTH_ACK 6     /* Yes, you have my vote */
 // 槽布局已经发生变化，消息发送者要求消息接收者进行相应的更新
 #define CLUSTERMSG_TYPE_UPDATE 7        /* Another node slots configuration */
+// 为了进行手动故障转移，暂停各个客户端
 #define CLUSTERMSG_TYPE_MFSTART 8       /* Pause clients for manual failover */
 
 /* Initially we don't know our "name", but we'll find it once we connect
@@ -331,6 +358,7 @@ typedef struct {
     // 节点的标识值
     uint16_t flags;
 
+    // 对齐字节，不使用
     uint32_t notused; /* for 64 bit alignment */
 
 } clusterMsgDataGossip;
@@ -446,6 +474,7 @@ typedef struct {
     // 消息发送者所处集群的状态
     unsigned char state; /* Cluster state from the POV of the sender */
 
+    // 消息标志
     unsigned char mflags[3]; /* Message flags: CLUSTERMSG_FLAG[012]_... */
 
     // 消息的正文（或者说，内容）

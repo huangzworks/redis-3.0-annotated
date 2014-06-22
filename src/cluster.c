@@ -44,6 +44,7 @@
 /* A global reference to myself is handy to make code more clear.
  * Myself always points to server.cluster->myself, that is, the clusterNode
  * that represents this node. */
+// 为了方便起见，维持一个 myself 全局变量，让它总是指向 cluster->myself 。
 clusterNode *myself = NULL;
 
 clusterNode *createClusterNode(char *nodename, int flags);
@@ -3074,6 +3075,7 @@ void clusterSendFailoverAuth(clusterNode *node) {
 }
 
 /* Send a MFSTART message to the specified node. */
+// 向给定的节点发送一条 MFSTART 消息
 void clusterSendMFStart(clusterNode *node) {
     unsigned char buf[sizeof(clusterMsg)];
     clusterMsg *hdr = (clusterMsg*) buf;
@@ -3411,6 +3413,7 @@ void clusterHandleSlaveFailover(void) {
         clusterBroadcastPong(CLUSTER_BROADCAST_ALL);
 
         /* 6) If there was a manual failover in progress, clear the state. */
+        // 如果有手动故障转移正在执行，那么清理和它有关的状态
         resetManualFailover();
     }
 }
@@ -3534,8 +3537,13 @@ void clusterHandleSlaveMigration(int max_slaves) {
 /* Reset the manual failover state. This works for both masters and slavesa
  * as all the state about manual failover is cleared.
  *
+ * 重置与手动故障转移有关的状态，主节点和从节点都可以使用。
+ *
  * The function can be used both to initialize the manual failover state at
- * startup or to abort a manual failover in progress. */
+ * startup or to abort a manual failover in progress. 
+ * 这个函数既可以用于在启动集群时进行初始化，
+ * 又可以实际地应用在手动故障转移的情况。
+ */
 void resetManualFailover(void) {
     if (server.cluster->mf_end && clientsArePaused()) {
         server.clients_pause_end_time = 0;
@@ -3797,6 +3805,8 @@ void clusterCron(void) {
 
         /* If we are a master and one of the slaves requested a manual
          * failover, ping it continuously. */
+        // 如果这是一个主节点，并且有一个从服务器请求进行手动故障转移
+        // 那么向从服务器发送 PING 。
         if (server.cluster->mf_end &&
             nodeIsMaster(myself) &&
             server.cluster->mf_slave == node &&
@@ -4021,6 +4031,8 @@ int clusterDelNodeSlots(clusterNode *node) {
 
 /* Clear the migrating / importing state for all the slots.
  * This is useful at initialization and when turning a master into slave. */
+// 清理所有槽的迁移和导入状态
+// 通常在初始化或者将主节点转为从节点时使用
 void clusterCloseAllSlots(void) {
     memset(server.cluster->migrating_slots_to,0,
         sizeof(server.cluster->migrating_slots_to));
@@ -4232,6 +4244,8 @@ int verifyClusterConfigWithData(void) {
 
 /* Set the specified node 'n' as master for this node.
  * If this node is currently a master, it is turned into a slave. */
+// 将节点 n 设置为当前节点的主节点
+// 如果当前节点为主节点，那么将它转换为从节点
 void clusterSetMaster(clusterNode *n) {
     redisAssert(n != myself);
     redisAssert(myself->numslots == 0);
@@ -4262,6 +4276,7 @@ void clusterSetMaster(clusterNode *n) {
  * See clusterGenNodesDescription() top comment for more information.
  *
  * The function returns the string representation as an SDS string. */
+// 生成节点的状态描述信息
 sds clusterGenNodeDescription(clusterNode *node) {
     int j, start;
     sds ci;
@@ -4856,6 +4871,8 @@ void clusterCommand(redisClient *c) {
         addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"slaves") && c->argc == 3) {
         /* CLUSTER SLAVES <NODE ID> */
+        // 打印给定主节点的所有从节点的信息
+
         clusterNode *n = clusterLookupNode(c->argv[2]->ptr);
         int j;
 
@@ -4880,6 +4897,8 @@ void clusterCommand(redisClient *c) {
                (c->argc == 2 || c->argc == 3))
     {
         /* CLUSTER FAILOVER [FORCE] */
+        // 执行手动故障转移
+
         int force = 0;
 
         if (c->argc == 3) {
@@ -4891,6 +4910,7 @@ void clusterCommand(redisClient *c) {
             }
         }
 
+        // 命令只能发送给从节点
         if (nodeIsMaster(myself)) {
             addReplyError(c,"You should send CLUSTER FAILOVER to a slave");
             return;
@@ -4898,19 +4918,28 @@ void clusterCommand(redisClient *c) {
                    (myself->slaveof == NULL || nodeFailed(myself->slaveof) ||
                    myself->slaveof->link == NULL))
         {
+            // 如果主节点已下线或者处于失效状态
+            // 并且命令没有给定 force 参数，那么命令执行失败
             addReplyError(c,"Master is down or failed, "
                             "please use CLUSTER FAILOVER FORCE");
             return;
         }
+
+        // 重置手动故障转移的有关属性
         resetManualFailover();
+        // 设定手动故障转移的最大执行时限
         server.cluster->mf_end = mstime() + REDIS_CLUSTER_MF_TIMEOUT;
 
         /* If this is a forced failover, we don't need to talk with our master
          * to agree about the offset. We just failover taking over it without
          * coordination. */
+        // 如果这是强制的手动 failover ，那么直接开始 failover ，
+        // 无须向其他 master 沟通偏移量。
         if (force) {
+            // 如果这是强制的手动故障转移，那么直接开始执行故障转移操作
             server.cluster->mf_can_start = 1;
         } else {
+            // 如果不是强制的话，那么需要和主节点比对相互的偏移量是否一致
             clusterSendMFStart(myself->slaveof);
         }
         redisLog(REDIS_WARNING,"Manual failover user request accepted.");
