@@ -520,6 +520,7 @@ int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
 }
 
 /* Try to encode a string object in order to save space */
+// 尝试对字符串对象进行编码，以节约内存。
 robj *tryObjectEncoding(robj *o) {
     long value;
 
@@ -535,16 +536,20 @@ robj *tryObjectEncoding(robj *o) {
     /* We try some specialized encoding only for objects that are
      * RAW or EMBSTR encoded, in other words objects that are still
      * in represented by an actually array of chars. */
+    // 只在字符串的编码为 RAW 或者 EMBSTR 时尝试进行编码
     if (!sdsEncodedObject(o)) return o;
 
     /* It's not safe to encode shared objects: shared objects can be shared
      * everywhere in the "object space" of Redis and may end in places where
      * they are not handled. We handle them only as values in the keyspace. */
+     // 不对共享对象进行编码
      if (o->refcount > 1) return o;
 
     /* Check if we can represent this string as a long integer.
      * Note that we are sure that a string larger than 21 chars is not
      * representable as a 32 nor 64 bit integer. */
+    // 检查字符串的长度，不对长度小于 21 的字符串进行编码
+    // 也不对可以被解释为整数的字符串进行编码
     len = sdslen(s);
     if (len <= 21 && string2l(s,len,&value)) {
         /* This object is encodable as a long. Try to use a shared object.
@@ -570,6 +575,7 @@ robj *tryObjectEncoding(robj *o) {
      * try the EMBSTR encoding which is more efficient.
      * In this representation the object and the SDS string are allocated
      * in the same chunk of memory to save space and cache misses. */
+    // 尝试将 RAW 编码的字符串编码为 EMBSTR 编码
     if (len <= REDIS_ENCODING_EMBSTR_SIZE_LIMIT) {
         robj *emb;
 
@@ -588,6 +594,7 @@ robj *tryObjectEncoding(robj *o) {
      * We do that only for relatively large strings as this branch
      * is only entered if the length of the string is greater than
      * REDIS_ENCODING_EMBSTR_SIZE_LIMIT. */
+    // 这个对象没办法进行编码，尝试从 SDS 中移除所有空余空间
     if (o->encoding == REDIS_ENCODING_RAW &&
         sdsavail(s) > len/10)
     {
@@ -998,6 +1005,7 @@ char *strEncoding(int encoding) {
 
 /* Given an object returns the min number of milliseconds the object was never
  * requested, using an approximated LRU algorithm. */
+// 使用近似 LRU 算法，计算出给定对象的闲置时长
 unsigned long long estimateObjectIdleTime(robj *o) {
     unsigned long long lruclock = LRU_CLOCK();
     if (lruclock >= o->lru) {
