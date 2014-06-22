@@ -44,6 +44,7 @@ size_t zmalloc_size_sds(sds s) {
 
 /* Return the amount of memory used by the sds string at object->ptr
  * for a string object. */
+// 返回 object->ptr 所指向的字符串对象所使用的内存数量。
 size_t getStringObjectSdsUsedMemory(robj *o) {
     redisAssertWithInfo(NULL,o,o->type == REDIS_STRING);
     switch(o->encoding) {
@@ -138,9 +139,13 @@ redisClient *createClient(int fd) {
     c->authenticated = 0;
     // 复制状态
     c->replstate = REDIS_REPL_NONE;
+    // 复制偏移量
     c->reploff = 0;
+    // 通过 ACK 命令接收到的偏移量
     c->repl_ack_off = 0;
+    // 通过 AKC 命令接收到偏移量的时间
     c->repl_ack_time = 0;
+    // 客户端为从服务器时使用，记录了从服务器所使用的端口号
     c->slave_listening_port = 0;
     // 回复链表
     c->reply = listCreate();
@@ -151,6 +156,7 @@ redisClient *createClient(int fd) {
     // 回复链表的释放和复制函数
     listSetFreeMethod(c->reply,decrRefCountVoid);
     listSetDupMethod(c->reply,dupClientReplyValue);
+    // 阻塞类型
     c->btype = REDIS_BLOCKED_NONE;
     // 阻塞超时
     c->bpop.timeout = 0;
@@ -233,6 +239,8 @@ int prepareClientToWrite(redisClient *c) {
 
 /* Create a duplicate of the last object in the reply list when
  * it is not exclusively owned by the reply list. */
+// 当回复列表中的最后一个对象并非属于回复的一部分时
+// 创建该对象的一个复制品
 robj *dupLastObjectIfNeeded(list *reply) {
     robj *new, *cur;
     listNode *ln;
@@ -1008,6 +1016,7 @@ void freeClient(redisClient *c) {
  * This function is useful when we need to terminate a client but we are in
  * a context where calling freeClient() is not possible, because the client
  * should be valid for the continuation of the flow of the program. */
+// 异步地释放给定的客户端
 void freeClientAsync(redisClient *c) {
     if (c->flags & REDIS_CLOSE_ASAP) return;
     c->flags |= REDIS_CLOSE_ASAP;
@@ -1266,6 +1275,7 @@ int processInlineBuffer(redisClient *c) {
 
 /* Helper function. Trims query buffer to make the function that processes
  * multi bulk requests idempotent. */
+// 如果在读入协议内容时，发现内容不符合协议，那么异步地关闭这个客户端。
 static void setProtocolError(redisClient *c, int pos) {
     if (server.verbosity >= REDIS_VERBOSE) {
         sds client = catClientInfoString(sdsempty(),c);
@@ -1471,6 +1481,7 @@ int processMultibulkBuffer(redisClient *c) {
     return REDIS_ERR;
 }
 
+// 处理客户端输入的命令内容
 void processInputBuffer(redisClient *c) {
 
     /* Keep processing while there is something in the input buffer */
@@ -1622,6 +1633,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     server.current_client = NULL;
 }
 
+// 获取客户端目前最大的一块缓冲区的大小
 void getClientsMaxBuffers(unsigned long *longest_output_list,
                           unsigned long *biggest_input_buffer) {
     redisClient *c;
@@ -1696,6 +1708,7 @@ char *getClientPeerId(redisClient *c) {
 
 /* Concatenate a string representing the state of a client in an human
  * readable format, into the sds string 's'. */
+// 获取客户端的各项信息，将它们储存到 sds 值 s 里面，并返回。
 sds catClientInfoString(sds s, redisClient *client) {
     char flags[16], events[3], *p;
     int emask;
@@ -2114,14 +2127,21 @@ void flushSlavesOutputBuffers(void) {
  * time left for the previous duration. However if the duration is smaller
  * than the time left for the previous pause, no change is made to the
  * left duration. */
+// 暂停客户端，让服务器在指定的时间内不再接受被暂停客户端发来的命令
+// 可以用于系统更新，并在内部由 CLUSTER FAILOVER 命令使用。
 void pauseClients(mstime_t end) {
+
+    // 设置暂停时间
     if (!server.clients_paused || end > server.clients_pause_end_time)
         server.clients_pause_end_time = end;
+
+    // 打开客户端的“已被暂停”标志
     server.clients_paused = 1;
 }
 
 /* Return non-zero if clients are currently paused. As a side effect the
  * function checks if the pause time was reached and clear it. */
+ // 判断服务器目前被暂停客户端的数量，没有任何客户端被暂停时，返回 0 。
 int clientsArePaused(void) {
     if (server.clients_paused && server.clients_pause_end_time < server.mstime) {
         listNode *ln;
@@ -2155,6 +2175,7 @@ int clientsArePaused(void) {
  * write, close sequence needed to serve a client.
  *
  * The function returns the total number of events processed. */
+// 让服务器在被阻塞的情况下，仍然处理某些事件。
 int processEventsWhileBlocked(void) {
     int iterations = 4; /* See the function top-comment. */
     int count = 0;
