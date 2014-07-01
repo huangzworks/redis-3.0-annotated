@@ -427,7 +427,7 @@ hashTypeIterator *hashTypeInitIterator(robj *subject) {
         redisPanic("Unknown hash encoding");
     }
 
-    // 返沪迭代器
+    // 返回迭代器
     return hi;
 }
 
