@@ -826,7 +826,7 @@ sds sdscatfmt(sds s, char const *fmt, ...) {
  * 比如 sdsstrim(xxyyabcyyxy, "xy") 将返回 "abc"
  *
  * 复杂性：
- *  T = O(N^2)
+ *  T = O(M*N)，M 为 SDS 长度， N 为 cset 长度。
  */
 /* Remove the part of the string from left and from right composed just of
  * contiguous characters found in 'cset', that is a null terminted C string.
