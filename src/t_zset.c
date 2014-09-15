@@ -416,7 +416,7 @@ static int zslValueLteMax(double value, zrangespec *spec) {
 
 /* Returns if there is a part of the zset is in range.
  *
- * 如果 zsl 中有至少一个节点的分值符合 range 中描述的范围，
+ * 如果给定的分值范围包含在跳跃表的分值范围之内，
  * 那么返回 1 ，否则返回 0 。
  *
  * T = O(1)
