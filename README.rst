@@ -18,9 +18,7 @@ Redis 3.0 源码注释
 
 另外，
 `新版《Redis 设计与实现》 <http://RedisBook.com>`_\ 正在各大网店发售中，
-`《Redis 从入门到精通》课程 <http://www.chinahadoop.cn/course/53>`_\ 也正在接受报名，
-如果这两个项目能获得大家的支持的话，
-我将不胜感激。
+希望大家可以多多支持这本书。
 
 Have fun!
 
