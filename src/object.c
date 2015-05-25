@@ -548,8 +548,8 @@ robj *tryObjectEncoding(robj *o) {
     /* Check if we can represent this string as a long integer.
      * Note that we are sure that a string larger than 21 chars is not
      * representable as a 32 nor 64 bit integer. */
-    // 检查字符串的长度，不对长度小于 21 的字符串进行编码
-    // 也不对可以被解释为整数的字符串进行编码
+    // 对字符串进行检查
+    // 只对长度大于 21 字节并且可以被解释为整数的字符串进行编码
     len = sdslen(s);
     if (len <= 21 && string2l(s,len,&value)) {
         /* This object is encodable as a long. Try to use a shared object.
