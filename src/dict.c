@@ -1228,7 +1228,7 @@ static unsigned long rev(unsigned long v) {
  * (in binary) 1111. The position of a key in the hash table will be always
  * the last four bits of the hash output, and so forth.
  *
- * 举个例子，如果当前哈希表的大小为 64 ，
+ * 举个例子，如果当前哈希表的大小为 16 ，
  * 那么它的掩码就是二进制值 1111 ，
  * 这个哈希表的所有位置都可以使用哈希值的最后四个二进制位来记录。
  *
@@ -1248,7 +1248,7 @@ static unsigned long rev(unsigned long v) {
  * either 0 or 1, can be targeted only by keys that we already visited
  * when scanning the bucket 1100 in the smaller hash table.
  *
- * 如果这时哈希表将大小改为 64 ，那么哈希表的 mask 将变为 11111 ，
+ * 如果这时哈希表将大小改为 64 ，那么哈希表的 mask 将变为 111111 ，
  *
  * By iterating the higher bits first, because of the inverted counter, the
  * cursor does not need to restart if the table size gets bigger, and will
