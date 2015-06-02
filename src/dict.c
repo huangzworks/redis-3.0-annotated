@@ -1228,7 +1228,7 @@ static unsigned long rev(unsigned long v) {
  * (in binary) 1111. The position of a key in the hash table will be always
  * the last four bits of the hash output, and so forth.
  *
- * 举个例子，如果当前哈希表的大小为 64 ，
+ * 举个例子，如果当前哈希表的大小为 16 ，
  * 那么它的掩码就是二进制值 1111 ，
  * 这个哈希表的所有位置都可以使用哈希值的最后四个二进制位来记录。
  *
