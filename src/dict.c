@@ -1248,7 +1248,7 @@ static unsigned long rev(unsigned long v) {
  * either 0 or 1, can be targeted only by keys that we already visited
  * when scanning the bucket 1100 in the smaller hash table.
  *
- * 如果这时哈希表将大小改为 64 ，那么哈希表的 mask 将变为 11111 ，
+ * 如果这时哈希表将大小改为 64 ，那么哈希表的 mask 将变为 111111 ，
  *
  * By iterating the higher bits first, because of the inverted counter, the
  * cursor does not need to restart if the table size gets bigger, and will
