@@ -36,8 +36,20 @@
  */
 #define SDS_MAX_PREALLOC (1024*1024)
 
+/*
+ * ASCII字符集长度
+ */
+#define ASCII_SIZE 256
+
 #include <sys/types.h>
 #include <stdarg.h>
+/*
+ *提供一个bool的接口
+ */
+typedef enum bool{
+    false,
+    true
+}bool;
 
 /*
  * 类型别名，用于指向 sdshdr 的 buf 属性
@@ -48,7 +60,7 @@ typedef char *sds;
  * 保存字符串对象的结构
  */
 struct sdshdr {
-    
+
     // buf 中已占用空间的长度
     int len;
 
