@@ -12,7 +12,9 @@
 # Dependencies are stored in the Makefile.dep file. To rebuild this file
 # Just use 'make dep', but this is only needed by developers.
 
+# h7: 创建编译信息
 release_hdr := $(shell sh -c './mkreleasehdr.sh')
+# h7: sh -c 'uname -s 2>/dev/null || echo not' 这一句在linux下执行的结果为 Linux，在mac下执行的结果为 Darwin
 uname_S := $(shell sh -c 'uname -s 2>/dev/null || echo not')
 OPTIMIZATION?=-O2
 DEPENDENCY_TARGETS=hiredis linenoise lua
@@ -25,6 +27,10 @@ OPT=$(OPTIMIZATION)
 PREFIX?=/usr/local
 INSTALL_BIN=$(PREFIX)/bin
 INSTALL=install
+
+# h7: 根据上面系统信息，确定动态内存分配器类型，下面定义了使用facebook的jemalloc，此外，也可以选择libc原生的malloc，但需要在每次内存分配前加4个字节记录内存分配的长度信息，以实现malloc_size的功能。源码中已经自带了jemalloc的源码，可以看出官方还是比较推崇使用jemalloc的。
+# h7: linux 下默认使用 jemalloc
+# h7: 详细信息可以参考： http://m.blog.csdn.net/blog/kaixin89/42217109 ；http://blog.sina.com.cn/s/blog_6f5b220601012x3x.html
 
 # Default allocator
 ifeq ($(uname_S),Linux)
@@ -82,6 +88,7 @@ ifeq ($(MALLOC),tcmalloc_minimal)
 	FINAL_LIBS+= -ltcmalloc_minimal
 endif
 
+# h7: 引入 jemalloc 的静态库
 ifeq ($(MALLOC),jemalloc)
 	DEPENDENCY_TARGETS+= jemalloc
 	FINAL_CFLAGS+= -DUSE_JEMALLOC -I../deps/jemalloc/include
