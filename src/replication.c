@@ -77,34 +77,36 @@ void createReplicationBacklog(void) {
  * server.repl_backlog_size and to resize the buffer and setup it so that
  * it contains the same data as the previous one (possibly less data, but
  * the most recent bytes, or the same data and more free space in case the
- * buffer is enlarged). */
-// 动态调整 backlog 大小
-// 当 backlog 是被扩大时，原有的数据会被保留，
-// 因为分配空间使用的是 realloc
+ * buffer is enlarged). 
+ * me:在运行时调整backlog的大小
+ * me:注意 上面的注释与源码对应不上。resize后会释放原来的缓冲区。
+ */
 void resizeReplicationBacklog(long long newsize) {
-
     // 不能小于最小大小
-    if (newsize < REDIS_REPL_BACKLOG_MIN_SIZE)
-        newsize = REDIS_REPL_BACKLOG_MIN_SIZE;
-
-    // 大小和目前大小相等
-    if (server.repl_backlog_size == newsize) return;
-
+    if (newsize < CONFIG_REPL_BACKLOG_MIN_SIZE)
+        newsize = CONFIG_REPL_BACKLOG_MIN_SIZE;
+    if (server.repl_backlog_size == newsize) return; //两者相等 无需重设
+  
     // 设置新大小
-    server.repl_backlog_size = newsize;
+    server.repl_backlog_size = newsize; 
     if (server.repl_backlog != NULL) {
         /* What we actually do is to flush the old buffer and realloc a new
          * empty one. It will refill with new data incrementally.
          * The reason is that copying a few gigabytes adds latency and even
          * worse often we need to alloc additional space before freeing the
-         * old buffer. */
+         * old buffer. 
+         * 我们是这样做的：清除老的buffer，重新分配一个空的buffer。新的buffer
+         * 将被新的数据填充。这样做的原因是:复制几G数据会有延时，更糟糕的是,
+         * 我们常常需要分配额外的内存空间，在释放老的buffer之前。
+         * 
+         */
         // 释放 backlog
-        zfree(server.repl_backlog);
+        zfree(server.repl_backlog); //调用free
         // 按新大小创建新 backlog
-        server.repl_backlog = zmalloc(server.repl_backlog_size);
+        server.repl_backlog = zmalloc(server.repl_backlog_size); //调用malloc分配内存
         server.repl_backlog_histlen = 0;
         server.repl_backlog_idx = 0;
-        /* Next byte we have is... the next since the buffer is emtpy. */
+        /* Next byte we have is... the next since the buffer is empty. */
         server.repl_backlog_off = server.master_repl_offset+1;
     }
 }
