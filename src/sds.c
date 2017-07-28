@@ -399,12 +399,12 @@ sds sdsgrowzero(sds s, size_t len) {
     // 将新分配的空间用 0 填充，防止出现垃圾内容
     // T = O(N)
     sh = (void*)(s-(sizeof(struct sdshdr)));
-    memset(s+curlen,0,(len-curlen+1)); /* also set trailing \0 byte */
+    memset(s+curlen, 0, (len - curlen + 1)); /* also set trailing \0 byte */
 
     // 更新属性
-    totlen = sh->len+sh->free;
+    totlen = sh->len + sh->free;
     sh->len = len;
-    sh->free = totlen-sh->len;
+    sh->free = totlen - sh->len;
 
     // 返回新的 sds
     return s;

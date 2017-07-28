@@ -66,17 +66,29 @@ void zlibc_free(void *ptr) {
 #define realloc(ptr,size) je_realloc(ptr,size)
 #define free(ptr) je_free(ptr)
 #endif
-
-#ifdef HAVE_ATOMIC
+// 在project下没有发现对应的宏定义
+#ifdef memory
+/*
+gcc 提供的原子操作：效率比互斥锁高，但是没有发现有memory的宏，所以应该还是互斥锁
+type __sync_fetch_and_add(type *ptr, type value, ...); // m + n
+type __sync_fetch_and_sub(type *ptr, type value, ...); // m - n
+type __sync_fetch_and_or(type *ptr, type value, ...);  // m | n
+type __sync_fetch_and_and(type *ptr, type value, ...); // m & n
+type __sync_fetch_and_xor(type *ptr, type value, ...); // m ^ n
+type __sync_fetch_and_nand(type *ptr, type value, ...); // (~m) & n
+*/
 #define update_zmalloc_stat_add(__n) __sync_add_and_fetch(&used_memory, (__n))
 #define update_zmalloc_stat_sub(__n) __sync_sub_and_fetch(&used_memory, (__n))
 #else
+// 在project下没有发现对应的宏定义， 这里redis主要用的还是互斥锁
+// increase
 #define update_zmalloc_stat_add(__n) do { \
     pthread_mutex_lock(&used_memory_mutex); \
     used_memory += (__n); \
     pthread_mutex_unlock(&used_memory_mutex); \
 } while(0)
 
+// reduce memory
 #define update_zmalloc_stat_sub(__n) do { \
     pthread_mutex_lock(&used_memory_mutex); \
     used_memory -= (__n); \
@@ -107,6 +119,24 @@ void zlibc_free(void *ptr) {
 
 static size_t used_memory = 0;
 static int zmalloc_thread_safe = 0;
+
+/*
+ * 静态创建互斥锁(mutex lock), POSIX定义了一个宏PTHREAD_MUTEX_INITIALIZER来静态初始化互斥锁
+ * 第二种方法是动态创建互斥锁: int pthread_mutex_init(pthread_mutex_t *restrict mutex,const pthread_mutexattr_t *restrict attr);
+ * pthread_mutex_init() 函数是以动态方式创建互斥锁的，
+ 参数attr指定了新建互斥锁的属性。如果参数attr为空，则使用默认的互斥锁属性，默认属性为快速互斥锁 。
+ 互斥锁的属性在创建锁的时候指定，在LinuxThreads实现中仅有一个锁类型属性，不同的锁类型在试图对一个已经被锁定的互斥锁加锁时表现不同。
+
+ *pthread_mutexattr_init() 函数成功完成之后会返回零，其他任何返回值都表示出现了错误。
+
+ * PTHREAD_MUTEX_TIMED_NP，这是缺省值，也就是普通锁。当一个线程加锁以后，其余请求锁的线程将形成一个等待队列，并在解锁后按优先级获得锁。
+ * 这种锁策略保证了资源分配的公平性。
+ * PTHREAD_MUTEX_RECURSIVE_NP，嵌套锁，允许同一个线程对同一个锁成功获得多次，并通过多次unlock解锁。
+ * 如果是不同线程请求，则在加锁线程解锁时重新竞争。
+ * PTHREAD_MUTEX_ERRORCHECK_NP，检错锁，如果同一个线程请求同一个锁，则返回EDEADLK，否则与PTHREAD_MUTEX_TIMED_NP类型动作相同。
+ * 这样就保证当不允许多次加锁时不会出现最简单情况下的死锁。
+ * PTHREAD_MUTEX_ADAPTIVE_NP，适应锁，动作最简单的锁类型，仅等待解锁后重新竞争。
+ * */
 pthread_mutex_t used_memory_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void zmalloc_default_oom(size_t size) {
