@@ -188,6 +188,8 @@ void setproctitle(const char *fmt, ...);
 #if (__i386 || __amd64) && __GNUC__
 #define GNUC_VERSION (__GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__)
 #if (GNUC_VERSION >= 40100) || defined(__clang__)
+// 用来控制内存管理，是否使用CPU提供的原子操作（add, sub等等）
+// 如果没有此宏定义，则Redis采用互斥锁(mutex lock)的方式
 #define HAVE_ATOMIC
 #endif
 #endif
