@@ -38,12 +38,20 @@
 void zlibc_free(void *ptr) {
     free(ptr);
 }
-
+/*
+ * 从整个zmalloc.* 的文件可以看出，Redis的内存管理的基本单位是这样组成的
+ * |--------------------------------------------------------------------------|
+ * | PREFIX_SIZE(1) | 数据内存空间(sizeof(size_t) 也就是8) 的整数倍，不够补齐 |
+ * |--------------------------------------------------------------------------|
+ * */
 #include <string.h>
 #include <pthread.h>
 #include "config.h"
 #include "zmalloc.h"
 
+// 这个宏的定义是在头文件 zmalloc.h 中的45行开始
+// 如果HAVE_MALLOC_SIZE被定义, 则表明Redis使用Goole的tcmalloc框架，或者使用Jemalloc来优化对内存的管理
+// 此时，如果调用zmalloc_size(p) 其实是调用的宏定义，执行的是tcmalloc框架的tc_malloc_size(p)或是Jemalloc的je_malloc_usable_size(p)
 #ifdef HAVE_MALLOC_SIZE
 #define PREFIX_SIZE (0)
 #else
@@ -55,6 +63,7 @@ void zlibc_free(void *ptr) {
 #endif
 
 /* Explicitly override malloc/free etc when using tcmalloc. */
+// 当使用tcmalloc库/jemalloc库的时候，显式覆盖malloc/calloc/realloc/free的方法
 #if defined(USE_TCMALLOC)
 #define malloc(size) tc_malloc(size)
 #define calloc(count,size) tc_calloc(count,size)
@@ -69,7 +78,7 @@ void zlibc_free(void *ptr) {
 // 在project下没有发现对应的宏定义
 #ifdef memory
 /*
-gcc 提供的原子操作：效率比互斥锁高，但是没有发现有memory的宏，所以应该还是互斥锁
+gcc 提供的原子操作：效率比互斥锁高
 type __sync_fetch_and_add(type *ptr, type value, ...); // m + n
 type __sync_fetch_and_sub(type *ptr, type value, ...); // m - n
 type __sync_fetch_and_or(type *ptr, type value, ...);  // m | n
@@ -97,6 +106,13 @@ type __sync_fetch_and_nand(type *ptr, type value, ...); // (~m) & n
 
 #endif
 
+/* 分配内存的宏定义，由参数 zmalloc_thread_safe 控制是否加锁操作
+ * 下文中函数 void zmalloc_enable_thread_safeness(void)，可以通过此函数的调用, 将 zmalloc_thread_safe 设为 1(true)
+ * sizeof(long)-1 是7，用二进制表示为 111
+ * 如果size不是8的整数倍，则and的结果>0(为true)，会做补齐操作
+ * sizeof(long)-(size&(sizeof(long)-1))
+ * 首先，(size&(sizeof(long)-1)是取size的二进制表示的后三位
+ * 然后，用sizeof(long) （即为8）减去上文的结果，得出的就是补齐长度为8所需的差值*/
 #define update_zmalloc_stat_alloc(__n) do { \
     size_t _n = (__n); \
     if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \
@@ -117,7 +133,10 @@ type __sync_fetch_and_nand(type *ptr, type value, ...); // (~m) & n
     } \
 } while(0)
 
-static size_t used_memory = 0;
+static size_t used_memory = 0; // 初始化全局变量 used_memory， 用来记录Redis中使用内存的大小，每次调用zmalloc 和 zfree, 都会对其进行修改
+
+// 初始化全局变量 zmalloc_thread_safe, 如果为0，则所有对 used_memory的操作都认为是线程安全的(默认单线程）
+// 通过调用方法 zmalloc_enable_thread_safeness 将值设为1，从而达到所有对used_memory操作均加锁或使用原子操作(认为是多线程环境)
 static int zmalloc_thread_safe = 0;
 
 /*
@@ -146,17 +165,24 @@ static void zmalloc_default_oom(size_t size) {
     abort();
 }
 
+// 将out of memory的handler函数定义为default的
+// 根据业务需求，应该可以自己定义OOM的handler
 static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
 
+// Redis 分配内存主要函数
 void *zmalloc(size_t size) {
+    // PREFIX_SIZE代表是否需要存储额外的变量prefix所占的内存字节数：Linux下为sizeof(size_t)=8
     void *ptr = malloc(size+PREFIX_SIZE);
 
     if (!ptr) zmalloc_oom_handler(size);
+    // 表明Google 的 tcmalloc 框架或者Jemalloc框架被使用
+    // 此时，如果调用zmalloc_size(p) 其实是调用的宏定义，执行的是tcmalloc框架的tc_malloc_size(p)或是Jemalloc的je_malloc_usable_size(p)
 #ifdef HAVE_MALLOC_SIZE
     update_zmalloc_stat_alloc(zmalloc_size(ptr));
     return ptr;
 #else
     *((size_t*)ptr) = size;
+    // 将分配指针位置向后移动PREFIX_SIZE尺寸，因为先保存size_t size，其占空间为PREFIX_SIZE大小，移动后返回的是能用空间的起始位置
     update_zmalloc_stat_alloc(size+PREFIX_SIZE);
     return (char*)ptr+PREFIX_SIZE;
 #endif
@@ -166,10 +192,13 @@ void *zcalloc(size_t size) {
     void *ptr = calloc(1, size+PREFIX_SIZE);
 
     if (!ptr) zmalloc_oom_handler(size);
+
+// 如果tc_malloc或者jemalloc库被加载的话，调用zmalloc_size()来初始化和管理内存空间
 #ifdef HAVE_MALLOC_SIZE
     update_zmalloc_stat_alloc(zmalloc_size(ptr));
     return ptr;
 #else
+// 反之，则正常使用lib自带的内存管理方法
     *((size_t*)ptr) = size;
     update_zmalloc_stat_alloc(size+PREFIX_SIZE);
     return (char*)ptr+PREFIX_SIZE;
@@ -207,14 +236,29 @@ void *zrealloc(void *ptr, size_t size) {
 
 /* Provide zmalloc_size() for systems where this function is not provided by
  * malloc itself, given that in that case we store a header with this
- * information as the first bytes of every allocation. */
+ * information as the first bytes of every allocation.
+ *
+ *
+ * 这个函数是为了完善Redis内存管理系统的功能
+ * 将malloc申请到的内存空间大小的信息(size)保存在malloc出来的空间的第一个字节中(参考前文中 PREFIX_SIZE)
+ *
+ * */
 #ifndef HAVE_MALLOC_SIZE
 size_t zmalloc_size(void *ptr) {
+    // 首先将ptr转义成char*类型，然后减去 PREFIX_SIZE是为了定位到malloc空间的开始 (第一个字节为size)
     void *realptr = (char*)ptr-PREFIX_SIZE;
+    // 此时，realptr指向的内存地址中，存的值是ptr内存空间的大小(因为realptr是申请的内存空间的第一个字节，Redis把size存放在这个字节上)
     size_t size = *((size_t*)realptr);
     /* Assume at least that all the allocations are padded at sizeof(long) by
-     * the underlying allocator. */
+     * the underlying allocator.
+     * 此处是假设所有申请到的内存空间都是补齐的(8的整数倍)
+     * sizeof(long)-1 是7，用二进制表示为 111
+     * 如果size不是8的整数倍，则and的结果>0(为true)，会做补齐操作
+     * sizeof(long)-(size&(sizeof(long)-1))
+     * 首先，(size&(sizeof(long)-1)是取size的二进制表示的后三位
+     * 然后，用sizeof(long) （即为8）减去上文的结果，得出的就是补齐长度为8所需的差值*/
     if (size&(sizeof(long)-1)) size += sizeof(long)-(size&(sizeof(long)-1));
+    // 这里size+PREFIX_SIZE才是真正的长度
     return size+PREFIX_SIZE;
 }
 #endif
@@ -245,10 +289,13 @@ char *zstrdup(const char *s) {
     return p;
 }
 
+// 输出Redis已经申请和使用的内存空间大小
+// 由全局变量 used_memory 来记录
 size_t zmalloc_used_memory(void) {
     size_t um;
 
     if (zmalloc_thread_safe) {
+// 在config.h 中定义，是否使用原子操作，反之，则使用互斥锁
 #ifdef HAVE_ATOMIC
         um = __sync_add_and_fetch(&used_memory, 0);
 #else
@@ -305,6 +352,7 @@ size_t zmalloc_get_rss(void) {
     close(fd);
 
     p = buf;
+    // RSS 在Linux的/proc/<pid>/stat文件夹下面的第24个
     count = 23; /* RSS is the 24th field in /proc/<pid>/stat */
     while(p && count--) {
         p = strchr(p,' ');
