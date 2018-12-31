@@ -1409,9 +1409,9 @@ static int _dictExpandIfNeeded(dict *d)
      * table (global setting) or we should avoid it but the ratio between
      * elements/buckets is over the "safe" threshold, we resize doubling
      * the number of buckets. */
-    // 一下两个条件之一为真时，对字典进行扩展
-    // 1）字典已使用节点数和字典大小之间的比率接近 1：1
-    //    并且 dict_can_resize 为真
+    // 当字典已使用节点数和字典大小之间的比率达到 1：1
+    // 并且以下两个条件之一为真时，对字典进行扩展
+    // 1）dict_can_resize 为真
     // 2）已使用节点数和字典大小之间的比率超过 dict_force_resize_ratio
     if (d->ht[0].used >= d->ht[0].size &&
         (dict_can_resize ||
