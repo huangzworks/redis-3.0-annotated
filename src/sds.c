@@ -150,7 +150,7 @@ sds sdsdup(const sds s) {
  * 释放给定的 sds
  *
  * 复杂度
- *  T = O(N)
+ *  T = O(1)
  */
 /* Free an sds string. No operation is performed if 's' is NULL. */
 void sdsfree(sds s) {
