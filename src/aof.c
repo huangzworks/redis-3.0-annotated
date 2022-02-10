@@ -834,7 +834,7 @@ void freeFakeClient(struct redisClient *c) {
  */
 int loadAppendOnlyFile(char *filename) {
 
-    // 为客户端
+    // 伪客户端
     struct redisClient *fakeClient;
 
     // 打开 AOF 文件
