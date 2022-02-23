@@ -4247,10 +4247,13 @@ int sentinelStartFailoverIfNeeded(sentinelRedisInstance *master) {
     if (master->flags & SRI_FAILOVER_IN_PROGRESS) return 0;
 
     /* Last failover attempt started too little time ago? */
+    // 当前时间戳 减去 主节点故障迁移的时间 小于 主节点超时时间(3min)的2倍
     if (mstime() - master->failover_start_time <
         master->failover_timeout*2)
     {
+        // 迁移标记 和 迁移开始时间不一致
         if (master->failover_delay_logged != master->failover_start_time) {
+            // 迁移开始时间 加上 迁移超时时间的2倍，取到秒级，计算出下次能够迁移的时间
             time_t clock = (master->failover_start_time +
                             master->failover_timeout*2) / 1000;
             char ctimebuf[26];
