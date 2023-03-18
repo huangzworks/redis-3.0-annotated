@@ -1025,8 +1025,9 @@ void activeExpireCycle(int type) {
 
             /* We don't repeat the cycle if there are less than 25% of keys
              * found expired in the current DB. */
-            // 如果已删除的过期键占当前总数据库带过期时间的键数量的 25 %
-            // 那么不再遍历
+            // 如果当前数据库已删除的过期键小于最大设置值的25%，那么不再遍历
+            // 检查的所有键都是随机的，如果一次检查中删除的过期键数目较多，
+            // 说明数据库中存在较多过期键，应该继续删除操作
         } while (expired > ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP/4);
     }
 }
